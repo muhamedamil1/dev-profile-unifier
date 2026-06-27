@@ -861,3 +861,42 @@ alter table profile_conflicts enable row level security;
 alter table profile_facts enable row level security;
 alter table llm_summaries enable row level security;
 alter table api_call_metrics enable row level security;
+
+
+-- ─────────────────────────────────────────────
+-- Explicit API role permissions
+-- ─────────────────────────────────────────────
+-- This project is backend-only. The FastAPI server uses the service role key.
+-- anon/authenticated clients should not directly access tables or views.
+
+revoke all on table resolution_runs from anon, authenticated;
+revoke all on table raw_source_records from anon, authenticated;
+revoke all on table source_accounts from anon, authenticated;
+revoke all on table canonical_profiles from anon, authenticated;
+revoke all on table profile_source_links from anon, authenticated;
+revoke all on table match_evidence from anon, authenticated;
+revoke all on table profile_conflicts from anon, authenticated;
+revoke all on table profile_facts from anon, authenticated;
+revoke all on table llm_summaries from anon, authenticated;
+revoke all on table api_call_metrics from anon, authenticated;
+
+revoke all on table health_profile_metrics from anon, authenticated;
+revoke all on table health_api_call_metrics from anon, authenticated;
+revoke all on table health_latest_github_rate_limit from anon, authenticated;
+revoke all on table health_llm_metrics from anon, authenticated;
+
+grant all on table resolution_runs to service_role;
+grant all on table raw_source_records to service_role;
+grant all on table source_accounts to service_role;
+grant all on table canonical_profiles to service_role;
+grant all on table profile_source_links to service_role;
+grant all on table match_evidence to service_role;
+grant all on table profile_conflicts to service_role;
+grant all on table profile_facts to service_role;
+grant all on table llm_summaries to service_role;
+grant all on table api_call_metrics to service_role;
+
+grant select on table health_profile_metrics to service_role;
+grant select on table health_api_call_metrics to service_role;
+grant select on table health_latest_github_rate_limit to service_role;
+grant select on table health_llm_metrics to service_role;
