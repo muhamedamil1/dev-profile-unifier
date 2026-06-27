@@ -152,6 +152,17 @@ class Settings(BaseSettings):
 
         return missing
 
+    def missing_recommended_settings(self) -> list[str]:
+        missing: list[str] = []
+
+        if not self._secret_is_configured(self.stackexchange_key):
+            missing.append("STACKEXCHANGE_KEY")
+
+        if not self._secret_is_configured(self.supabase_anon_key):
+            missing.append("SUPABASE_ANON_KEY")
+
+        return missing
+
     def assert_production_ready(self) -> None:
         """
         Fails fast in production if critical config is missing.
@@ -186,6 +197,7 @@ class Settings(BaseSettings):
             "cors_origins_configured": bool(self.cors_origins),
             "integrations": self.configured_integrations(),
             "missing_required_settings": self.missing_required_settings(),
+            "missing_recommended_settings": self.missing_recommended_settings(),
         }
 
 

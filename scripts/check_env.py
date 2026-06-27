@@ -13,6 +13,7 @@ from app.config import get_settings
 def main() -> int:
     settings = get_settings()
     missing = settings.missing_required_settings()
+    recommended_missing = settings.missing_recommended_settings()
     integrations = settings.configured_integrations()
 
     print(f"Service: {settings.app_name} v{settings.app_version}")
@@ -32,6 +33,15 @@ def main() -> int:
             print(f"  - {item}")
     else:
         print("All required production settings are configured.")
+
+    print("")
+
+    if recommended_missing:
+        print("Missing recommended settings:")
+        for item in recommended_missing:
+            print(f"  - {item}")
+    else:
+        print("All recommended settings are configured.")
 
     strict = "--strict" in sys.argv
 
