@@ -156,7 +156,9 @@ class StorageError(DevProfileUnifierError):
         message: str = "Database operation failed.",
         *,
         details: dict[str, Any] | None = None,
+        internal_details: dict[str, Any] | None = None,
     ) -> None:
+        self.internal_details = internal_details or {}
         super().__init__(message, details=details)
 
 
