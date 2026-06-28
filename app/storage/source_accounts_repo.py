@@ -10,7 +10,7 @@ class SourceAccountsRepo(BaseRepository):
     table_name = "source_accounts"
 
     def upsert_account(self, account: SourceAccount) -> dict:
-        payload = account.to_db_payload()
+        payload = self._serialize_payload(account.to_db_payload())
 
         data = self._execute(
             self.client.table(self.table_name).upsert(

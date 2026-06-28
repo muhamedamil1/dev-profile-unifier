@@ -9,6 +9,11 @@ from app.integrations import (
     HackerNewsClient,
     StackOverflowClient,
 )
+from app.services import (
+    CandidateDiscoveryService,
+    IngestionService,
+    SourceAccountNormalizationService,
+)
 from app.storage import (
     ConflictsRepo,
     EvidenceRepo,
@@ -22,7 +27,6 @@ from app.storage import (
     get_supabase_client,
 )
 
-from app.services import CandidateDiscoveryService, IngestionService
 
 def _secret_value(value: SecretStr | None) -> str | None:
     if value is None:
@@ -112,6 +116,7 @@ def get_hackernews_client() -> HackerNewsClient:
         metrics_repo=get_metrics_repo(),
     )
 
+
 def get_candidate_discovery_service() -> CandidateDiscoveryService:
     settings = get_settings()
 
@@ -130,4 +135,11 @@ def get_ingestion_service() -> IngestionService:
         stackoverflow_client=get_stackoverflow_client(),
         devto_client=get_devto_client(),
         hackernews_client=get_hackernews_client(),
+    )
+
+
+def get_source_account_normalization_service() -> SourceAccountNormalizationService:
+    return SourceAccountNormalizationService(
+        raw_records_repo=get_raw_records_repo(),
+        source_accounts_repo=get_source_accounts_repo(),
     )
