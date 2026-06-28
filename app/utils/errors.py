@@ -58,19 +58,11 @@ class PlatformAPIError(DevProfileUnifierError):
 
     def __init__(
         self,
-        source: str,
-        platform_status_code: int | None = None,
-        message: str | None = None,
+        message: str = "External platform API request failed.",
+        *,
+        details: dict[str, Any] | None = None,
     ) -> None:
-        self.source = source
-        self.platform_status_code = platform_status_code
-        super().__init__(
-            message or f"{source} API request failed.",
-            details={
-                "source": source,
-                "platform_status_code": platform_status_code,
-            },
-        )
+        super().__init__(message, details=details)
 
 
 class PlatformNotFoundError(PlatformAPIError):
@@ -78,46 +70,17 @@ class PlatformNotFoundError(PlatformAPIError):
     status_code = 404
     public_message = "External platform account was not found."
 
-    def __init__(self, source: str, handle: str = "") -> None:
-        super().__init__(
-            source=source,
-            platform_status_code=404,
-            message=f"{source} account was not found.",
-        )
-        self.handle = handle
-        self.details["handle"] = handle
-
 
 class PlatformRateLimitError(PlatformAPIError):
     code = "platform_rate_limited"
     status_code = 429
     public_message = "External platform rate limit was reached."
 
-    def __init__(
-        self,
-        source: str,
-        reset_at: str | None = None,
-    ) -> None:
-        super().__init__(
-            source=source,
-            platform_status_code=429,
-            message=f"{source} rate limit was reached.",
-        )
-        if reset_at:
-            self.details["reset_at"] = reset_at
-
 
 class PlatformTimeoutError(PlatformAPIError):
     code = "platform_timeout"
     status_code = 504
     public_message = "External platform request timed out."
-
-    def __init__(self, source: str) -> None:
-        super().__init__(
-            source=source,
-            platform_status_code=None,
-            message=f"{source} request timed out.",
-        )
 
 
 class ResolutionFailedError(DevProfileUnifierError):
