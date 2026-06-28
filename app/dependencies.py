@@ -22,6 +22,7 @@ from app.storage import (
     get_supabase_client,
 )
 
+from app.services import CandidateDiscoveryService, IngestionService
 
 def _secret_value(value: SecretStr | None) -> str | None:
     if value is None:
@@ -109,4 +110,24 @@ def get_hackernews_client() -> HackerNewsClient:
     return HackerNewsClient(
         timeout_seconds=settings.request_timeout_seconds,
         metrics_repo=get_metrics_repo(),
+    )
+
+def get_candidate_discovery_service() -> CandidateDiscoveryService:
+    settings = get_settings()
+
+    return CandidateDiscoveryService(
+        max_candidates_per_platform=min(settings.max_candidates_per_platform, 3),
+        max_total_candidates=12,
+        expand_name_variants_when_direct_input_exists=False,
+    )
+
+
+def get_ingestion_service() -> IngestionService:
+    return IngestionService(
+        candidate_discovery=get_candidate_discovery_service(),
+        raw_records_repo=get_raw_records_repo(),
+        github_client=get_github_client(),
+        stackoverflow_client=get_stackoverflow_client(),
+        devto_client=get_devto_client(),
+        hackernews_client=get_hackernews_client(),
     )

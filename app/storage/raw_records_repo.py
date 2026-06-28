@@ -12,6 +12,12 @@ class RawRecordsRepo(BaseRepository):
     def insert_record(self, record: RawSourceRecord) -> dict:
         return self._insert_one(record.to_db_payload())
 
+    def insert_many_records(self, records: list[RawSourceRecord]) -> list[dict]:
+        if not records:
+            return []
+
+        return self._insert_many([record.to_db_payload() for record in records])
+
     def list_by_run(self, resolution_run_id: str | UUID) -> list[dict]:
         data = self._execute(
             self.client.table(self.table_name)
