@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -55,7 +55,7 @@ class ResolutionRunsRepo(BaseRepository):
             run_id,
             {
                 "status": status.value,
-                "completed_at": datetime.now(UTC).isoformat(),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
                 "duration_ms": duration_ms,
                 "sources_attempted": sources_attempted,
                 "sources_succeeded": sources_succeeded,
