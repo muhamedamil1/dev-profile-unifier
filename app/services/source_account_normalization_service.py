@@ -136,6 +136,7 @@ class SourceAccountNormalizationService:
                         )
                     else:
                         normalized.persisted_row = persisted_row
+                        self._copy_persisted_id(normalized.source_account, persisted_row)
 
                 normalized_accounts.append(normalized)
 
@@ -144,6 +145,19 @@ class SourceAccountNormalizationService:
             accounts=normalized_accounts,
             warnings=warnings,
         )
+
+    def _copy_persisted_id(self, account: Any, persisted_row: dict[str, Any] | None) -> None:
+        if not persisted_row:
+            return
+
+        persisted_id = persisted_row.get("id")
+        if not persisted_id:
+            return
+
+        try:
+            account.id = UUID(str(persisted_id))
+        except (TypeError, ValueError):
+            return
 
     def _group_records(
         self,

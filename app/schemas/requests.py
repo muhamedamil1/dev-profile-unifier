@@ -10,6 +10,7 @@ from app.schemas.enums import PlatformSource
 
 
 _SIMPLE_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_EMAIL_SEARCH_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 
 def _clean_optional_platform_value(value: Any) -> str | None:
@@ -96,6 +97,10 @@ class ProfileResolveRequest(BaseModel):
         cleaned = str(value).strip().lower()
         if not cleaned:
             return None
+
+        email_match = _EMAIL_SEARCH_RE.search(cleaned)
+        if email_match:
+            return email_match.group(0).lower()
 
         return cleaned
 
