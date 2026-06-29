@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from typing import Any
 from uuid import UUID
 
 from app.schemas.evidence import ExtractedEvidence
@@ -65,57 +67,100 @@ class EvidenceRepo(BaseRepository):
 
         return data if isinstance(data, list) else []
 
-    def delete_by_run(self, resolution_run_id: UUID | str) -> int:
+    def delete_for_profile(self, profile_id: UUID | str) -> int:
+        link_data = self._execute(
+            self.client.table("profile_source_links")
+            .select("id")
+            .eq("profile_id", str(profile_id)),
+            operation="list_profile_links_for_evidence_delete",
+        )
+        link_ids = [row["id"] for row in link_data or [] if row.get("id")]
+        if not link_ids:
+            return 0
+
         data = self._execute(
             self.client.table(self.table_name)
             .delete()
-            .eq("resolution_run_id", str(resolution_run_id)),
-            operation="delete_match_evidence_by_run",
+            .in_("profile_source_link_id", link_ids),
+            operation="delete_match_evidence_for_profile",
         )
-
         return len(data or [])
 
-    def insert_many_for_run(
+    def insert_many_for_profile_links(
         self,
         *,
-        resolution_run_id: UUID | str,
         evidence: list[ExtractedEvidence],
-        profile_source_link_ids_by_account_id: dict[str, str | UUID] | None = None,
+        source_link_by_account_id: dict[str, str | UUID],
     ) -> list[dict]:
         if not evidence:
             return []
 
-        link_ids_by_account = profile_source_link_ids_by_account_id or {}
-        payloads = []
+        payloads: list[dict[str, Any]] = []
         for item in evidence:
-            source_account_id = str(item.source_account_id) if item.source_account_id else None
-            direction = item.direction.value
-            signal_weight = item.weight
-            if direction == "negative":
-                signal_weight = -abs(signal_weight)
-            elif direction == "neutral":
-                signal_weight = 0.0
+            if item.source_account_id is None:
+                continue
+
+            source_account_id = str(item.source_account_id)
+            profile_source_link_id = source_link_by_account_id.get(source_account_id)
+            if profile_source_link_id is None:
+                continue
 
             payloads.append(
                 {
-                    "resolution_run_id": str(resolution_run_id),
-                    "profile_source_link_id": (
-                        str(link_ids_by_account[source_account_id])
-                        if source_account_id and source_account_id in link_ids_by_account
-                        else None
-                    ),
+                    "profile_source_link_id": str(profile_source_link_id),
                     "source_account_a_id": source_account_id,
                     "source_account_b_id": str(item.target_account_id) if item.target_account_id else None,
                     "signal_type": item.evidence_type.value,
-                    "direction": direction,
-                    "signal_weight": signal_weight,
+                    "direction": item.direction.value,
+                    "signal_weight": self._signed_weight(item),
                     "source_a": item.source.value,
                     "source_b": item.target_source.value if item.target_source else None,
-                    "field_name": item.independence_group.value,
-                    "field_value_a": item.source_account_key,
-                    "field_value_b": item.target_account_key,
+                    "field_name": self._field_name(item),
+                    "field_value_a": self._field_value_a(item),
+                    "field_value_b": self._field_value_b(item),
                     "explanation": item.reason,
                 }
             )
 
+        if not payloads:
+            return []
+
         return self._insert_many(payloads)
+
+    def _signed_weight(self, item: ExtractedEvidence) -> float:
+        if item.direction.value == "negative":
+            return -abs(item.weight)
+        if item.direction.value == "neutral":
+            return 0.0
+        return abs(item.weight)
+
+    def _field_name(self, item: ExtractedEvidence) -> str:
+        return str(
+            item.metadata.get("field_name")
+            or item.metadata.get("independence_group")
+            or item.evidence_type.value
+        )
+
+    def _field_value_a(self, item: ExtractedEvidence) -> str | None:
+        value = (
+            item.metadata.get("source_value")
+            or item.metadata.get("request_value")
+            or item.metadata.get("field_value_a")
+            or item.source_account_key
+        )
+        return self._stringify_field_value(value)
+
+    def _field_value_b(self, item: ExtractedEvidence) -> str | None:
+        value = (
+            item.metadata.get("target_value")
+            or item.metadata.get("field_value_b")
+            or item.target_account_key
+        )
+        return self._stringify_field_value(value)
+
+    def _stringify_field_value(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True, default=str)
+        return str(value)

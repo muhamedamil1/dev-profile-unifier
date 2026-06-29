@@ -212,17 +212,33 @@ class ProfilesRepo(BaseRepository):
         payload = {
             "resolution_run_id": str(resolution_run_id),
             "display_name": request.name,
+            "headline": None,
+            "location": None,
+            "bio": None,
+            "primary_avatar_url": None,
+            "primary_website_url": None,
+            "inferred_skills": [],
             "confidence_level": summary.get("confidence_level", ProfileConfidenceLevel.UNCERTAIN.value),
             "profile_payload": {
                 "profile_stage": "resolution_shell",
                 "phase": "7E",
                 "canonical_fields_pending": True,
                 "resolution_summary": summary,
+                "max_evidence_confidence_score": summary.get("max_evidence_confidence_score"),
+                "max_decision_confidence_score": summary.get("max_decision_confidence_score"),
+                "created_by": "resolution_service",
             },
         }
 
         if existing:
-            return self._update_by_id(existing["id"], payload), False
+            clean_payload = self._serialize_payload(payload, strip_none=False)
+            data = self._execute(
+                self.client.table(self.table_name)
+                .update(clean_payload)
+                .eq("id", str(existing["id"])),
+                operation="update_resolution_shell",
+            )
+            return self._require_one(data, operation="update_resolution_shell"), False
 
         return self._insert_one(payload), True
 
@@ -239,26 +255,29 @@ class ProfilesRepo(BaseRepository):
     def insert_source_links_for_classifications(
         self,
         *,
-        canonical_profile_id: UUID | str,
+        canonical_profile_id: UUID | str | None = None,
+        profile_id: UUID | str | None = None,
         classifications: list[AccountClassification],
     ) -> list[dict[str, Any]]:
         if not classifications:
             return []
 
+        target_profile_id = profile_id if profile_id is not None else canonical_profile_id
+        if target_profile_id is None:
+            return []
+
         payloads = [
             {
-                "profile_id": str(canonical_profile_id),
+                "profile_id": str(target_profile_id),
                 "source_account_id": str(item.source_account_id),
                 "confidence_score": item.decision_confidence_score,
                 "decision": item.decision.value,
                 "relationship_type": self._relationship_type_for_decision(item),
                 "verification_status": self._verification_status_for_decision(item),
-                "positive_signal_count": max(
-                    len(item.independent_positive_groups),
-                    2 if item.decision == MatchDecision.AUTO_MATCH else 0,
-                ),
+                "positive_signal_count": len(item.independent_positive_groups),
                 "negative_signal_count": len(item.conflict_types),
                 "has_high_conflict": bool(item.blocking_conflict_types),
+                "decision_payload": self._decision_payload(item),
             }
             for item in classifications
             if item.source_account_id is not None
@@ -291,9 +310,33 @@ class ProfilesRepo(BaseRepository):
             return VerificationStatus.CLAIMED_BY_INPUT.value
 
         if item.decision == MatchDecision.AUTO_MATCH:
-            return VerificationStatus.LIKELY_SAME_PERSON.value
+            return VerificationStatus.EVIDENCE_MATCHED.value
 
         if item.decision == MatchDecision.NEEDS_REVIEW:
             return VerificationStatus.NEEDS_REVIEW.value
 
         return VerificationStatus.REJECTED.value
+
+    def _decision_payload(self, item: AccountClassification) -> dict[str, Any]:
+        return {
+            "decision_basis": item.decision_basis.value,
+            "risk_level": item.risk_level.value,
+            "rationale": item.rationale,
+            "evidence_confidence_score": item.evidence_confidence_score,
+            "decision_confidence_score": item.decision_confidence_score,
+            "account_score": item.account_score,
+            "best_pair_score": item.best_pair_score,
+            "is_anchor": item.is_anchor,
+            "accepted_as_anchor": item.accepted_as_anchor,
+            "best_anchor_account_key": item.best_anchor_account_key,
+            "best_pair_key": item.best_pair_key,
+            "independent_positive_groups": item.independent_positive_groups,
+            "strong_positive_groups": item.strong_positive_groups,
+            "weak_positive_groups": item.weak_positive_groups,
+            "weak_signal_only": item.weak_signal_only,
+            "hn_conservative": item.hn_conservative,
+            "hn_requires_strong_evidence": item.hn_requires_strong_evidence,
+            "conflict_types": item.conflict_types,
+            "blocking_conflict_types": item.blocking_conflict_types,
+            "metadata": item.metadata,
+        }

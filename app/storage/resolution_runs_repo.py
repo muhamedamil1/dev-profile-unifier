@@ -68,23 +68,45 @@ class ResolutionRunsRepo(BaseRepository):
     def mark_failed(
         self,
         *,
-        run_id: str | UUID,
-        duration_ms: int,
-        sources_attempted: list[str],
-        sources_failed: list[str],
+        run_id: str | UUID | None = None,
+        resolution_run_id: str | UUID | None = None,
+        duration_ms: int | None = None,
+        sources_attempted: list[str] | None = None,
+        sources_failed: list[str] | None = None,
         source_errors: list[dict[str, Any]] | None = None,
         error_message: str | None = None,
+        error_details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.complete_run(
-            run_id=run_id,
-            status=ResolutionStatus.FAILED,
-            duration_ms=duration_ms,
-            sources_attempted=sources_attempted,
-            sources_succeeded=[],
-            sources_failed=sources_failed,
-            source_errors=source_errors or [],
-            error_message=error_message or "Resolution failed.",
-        )
+        target_run_id = resolution_run_id if resolution_run_id is not None else run_id
+        if target_run_id is None:
+            raise ValueError("mark_failed requires run_id or resolution_run_id")
+
+        existing = self.get_by_id(target_run_id) or {}
+        existing_errors = existing.get("source_errors") if isinstance(existing.get("source_errors"), list) else []
+        merged_errors = [*existing_errors, *(source_errors or [])]
+        if error_details:
+            merged_errors.append(error_details)
+
+        summary = existing.get("result_summary") if isinstance(existing.get("result_summary"), dict) else {}
+        failed_summary = {
+            **summary,
+            "phase": "7E",
+            "failed": True,
+        }
+
+        payload = {
+            "status": ResolutionStatus.FAILED.value,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": duration_ms if duration_ms is not None else self._duration_ms_from_started_at(existing),
+            "sources_attempted": sources_attempted if sources_attempted is not None else existing.get("sources_attempted", []),
+            "sources_succeeded": [],
+            "sources_failed": sources_failed if sources_failed is not None else existing.get("sources_failed", []),
+            "source_errors": merged_errors,
+            "error_message": error_message or "Resolution failed.",
+            "result_summary": failed_summary,
+        }
+
+        return self._update_by_id(target_run_id, payload)
 
     def delete_by_id(self, resolution_run_id: UUID | str) -> int:
         data = self._execute(
@@ -128,10 +150,29 @@ class ResolutionRunsRepo(BaseRepository):
         status: ResolutionStatus,
         summary: dict[str, Any],
     ) -> dict:
+        existing = self.get_by_id(resolution_run_id) or {}
         payload = {
             "status": status.value,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "result_summary": summary,
         }
+        duration_ms = self._duration_ms_from_started_at(existing)
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
 
         return self._update_by_id(str(resolution_run_id), payload)
+
+    def _duration_ms_from_started_at(self, row: dict[str, Any]) -> int | None:
+        started_at = row.get("started_at")
+        if not started_at:
+            return None
+
+        try:
+            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+
+        return max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
