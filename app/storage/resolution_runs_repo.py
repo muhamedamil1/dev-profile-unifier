@@ -85,3 +85,53 @@ class ResolutionRunsRepo(BaseRepository):
             source_errors=source_errors or [],
             error_message=error_message or "Resolution failed.",
         )
+
+    def delete_by_id(self, resolution_run_id: UUID | str) -> int:
+        data = self._execute(
+            self.client.table(self.table_name)
+            .delete()
+            .eq("id", str(resolution_run_id)),
+            operation="delete_resolution_run",
+        )
+
+        return len(data or [])
+
+    def delete_finished_before(
+        self,
+        *,
+        cutoff: datetime,
+        statuses: list[ResolutionStatus | str] | None = None,
+    ) -> int:
+        if statuses is None:
+            statuses = [
+                ResolutionStatus.RESOLVED.value,
+                ResolutionStatus.FAILED.value,
+                ResolutionStatus.PARTIAL.value,
+            ]
+        else:
+            statuses = [ResolutionStatus(s).value if isinstance(s, str) else s.value for s in statuses]
+
+        data = self._execute(
+            self.client.table(self.table_name)
+            .delete()
+            .in_("status", statuses)
+            .lt("completed_at", cutoff.isoformat()),
+            operation="delete_finished_resolution_runs",
+        )
+
+        return len(data or [])
+
+    def finalize_resolution(
+        self,
+        *,
+        resolution_run_id: UUID | str,
+        status: ResolutionStatus,
+        summary: dict[str, Any],
+    ) -> dict:
+        payload = {
+            "status": status.value,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "result_summary": summary,
+        }
+
+        return self._update_by_id(str(resolution_run_id), payload)
