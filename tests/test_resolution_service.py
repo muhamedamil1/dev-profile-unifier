@@ -173,7 +173,7 @@ class FakeProfilesRepo:
         self.links_by_profile[profile_id] = []
         return count
 
-    def insert_source_links_for_classifications(self, *, canonical_profile_id=None, profile_id=None, classifications):
+    def insert_source_links_for_classifications(self, *, canonical_profile_id=None, profile_id=None, classifications, review_outcome_by_key=None):
         target_profile_id = str(profile_id if profile_id is not None else canonical_profile_id)
         rows = []
         for item in classifications:
