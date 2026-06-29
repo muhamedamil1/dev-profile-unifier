@@ -55,6 +55,12 @@ from app.storage.metrics_repo import MetricsRepo
 from app.llm.gemini_client import GeminiClient, GeminiRetryConfig
 from app.llm.rate_limiter import GeminiRateLimitConfig, GeminiRateLimiter
 
+
+from app.services.health_dashboard_service import HealthDashboardService
+from app.services.profile_orchestration_service import ProfileOrchestrationService
+from app.services.profile_read_service import ProfileReadService
+
+
 _SHARED_GEMINI_RATE_LIMITER: GeminiRateLimiter | None = None
 _SHARED_GEMINI_CLIENT: GeminiClient | None = None
 
@@ -209,34 +215,13 @@ def _first_setting(settings, *names: str, default=None):
 
 
 def get_summary_service() -> SummaryService:
-    settings = get_settings()
-
-    api_key = _first_setting(
-        settings,
-        "gemini_api_key",
-        "google_gemini_api_key",
-        "google_api_key",
-        "GEMINI_API_KEY",
-    )
-    model_name = _first_setting(
-        settings,
-        "gemini_model",
-        "gemini_model_name",
-        default="gemini-1.5-flash",
-    )
-
-    
     return SummaryService(
-        profiles_repo=ProfilesRepo(),
-        summaries_repo=SummariesRepo(),
-        metrics_repo=MetricsRepo(),
-        resolution_runs_repo=ResolutionRunsRepo(),
-        gemini_client=GeminiClient(
-            api_key=api_key,
-            model_name=model_name,
-        ),
+        profiles_repo=get_profiles_repo(),
+        summaries_repo=get_summaries_repo(),
+        metrics_repo=get_metrics_repo(),
+        resolution_runs_repo=get_resolution_runs_repo(),
+        gemini_client=get_gemini_client(),
     )
-
 
 
 def _first_setting(settings, *names: str, default=None):
@@ -249,30 +234,12 @@ def _first_setting(settings, *names: str, default=None):
 
 def get_gemini_ambiguity_reviewer() -> GeminiAmbiguityReviewer:
     settings = get_settings()
-    api_key = _first_setting(
-        settings,
-        "gemini_api_key",
-        "google_gemini_api_key",
-        "google_api_key",
-        "GEMINI_API_KEY",
-    )
-    model_name = _first_setting(
-        settings,
-        "gemini_model",
-        "gemini_model_name",
-        "GEMINI_MODEL",
-        default="gemini-1.5-flash",
-    )
 
     return GeminiAmbiguityReviewer(
-        gemini_client=GeminiClient(
-            api_key=api_key,
-            model_name=model_name,
-        ),
-        metrics_repo=MetricsRepo(),
+        gemini_client=get_gemini_client(),
+        metrics_repo=get_metrics_repo(),
         settings=settings,
     )
-
 
 
 def _first_setting(settings, *names: str, default=None):
@@ -338,3 +305,33 @@ def reset_shared_gemini_client_for_tests() -> None:
     _SHARED_GEMINI_CLIENT = None
     _SHARED_GEMINI_RATE_LIMITER = None
 
+
+
+
+def get_profile_read_service() -> ProfileReadService:
+    return ProfileReadService(
+        profiles_repo=get_profiles_repo(),
+        summaries_repo=get_summaries_repo(),
+        resolution_runs_repo=get_resolution_runs_repo(),
+    )
+
+
+def get_health_dashboard_service() -> HealthDashboardService:
+    return HealthDashboardService(
+        supabase_client=get_supabase_client(),
+        metrics_repo=get_metrics_repo(),
+        resolution_runs_repo=get_resolution_runs_repo(),
+        settings=get_settings(),
+    )
+
+
+def get_profile_orchestration_service() -> ProfileOrchestrationService:
+    return ProfileOrchestrationService(
+        ingestion_service=get_ingestion_service(),
+        normalization_service=get_source_account_normalization_service(),
+        resolution_service=get_resolution_service(),
+        canonical_profile_service=get_canonical_profile_service(),
+        summary_service=get_summary_service(),
+        profile_read_service=get_profile_read_service(),
+        settings=get_settings(),
+    )

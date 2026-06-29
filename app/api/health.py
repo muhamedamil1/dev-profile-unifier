@@ -1,41 +1,37 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import HTMLResponse
 
-from fastapi import APIRouter, Depends
-
-from app.config import Settings
-from app.dependencies import get_app_settings
+from app.dependencies import get_health_dashboard_service
+from app.schemas.observability import HealthDashboardResponse
+from app.services.health_dashboard_service import HealthDashboardService
 
 router = APIRouter(tags=["health"])
 
 
-@router.get("/health")
-async def health(settings: Settings = Depends(get_app_settings)) -> dict[str, Any]:
-    """
-    Liveness/configuration health endpoint.
+@router.get("/health", response_model=HealthDashboardResponse)
+def health(
+    include_raw: bool = Query(default=False, description="Include raw health_* view rows. Intended for local debugging."),
+    service: HealthDashboardService = Depends(get_health_dashboard_service),
+) -> HealthDashboardResponse:
+    """Return production-useful observability metrics as JSON."""
 
-    This is intentionally real and useful in Phase 1:
-    - confirms the API process is alive
-    - confirms config loaded successfully
-    - exposes missing required settings without leaking secret values
+    return service.get_health(include_raw=include_raw)
 
-    In the observability phase, this same endpoint will be expanded with database-
-    aggregated API calls, GitHub rate limits, profile counts, and LLM token usage.
-    """
-    missing = settings.missing_required_settings()
-    status = "ok" if not missing else "degraded"
 
-    return {
-        "status": status,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "service": settings.app_name,
-        "version": settings.app_version,
-        "environment": settings.app_env,
-        "checks": {
-            "api": "ok",
-            "config": "ok" if not missing else "missing_required_settings",
-        },
-        "config": settings.safe_runtime_config(),
-    }
+@router.get("/dashboard", response_class=HTMLResponse)
+def dashboard(
+    token: str | None = Query(default=None, description="Optional dashboard token when DASHBOARD_TOKEN is configured."),
+    authorization: str | None = Header(default=None),
+    service: HealthDashboardService = Depends(get_health_dashboard_service),
+) -> HTMLResponse:
+    """Simple HTML observability dashboard for manual checks."""
+
+    if not service.validate_dashboard_token(token=token, authorization=authorization):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Dashboard authentication failed.",
+        )
+
+    return HTMLResponse(service.render_html_dashboard())

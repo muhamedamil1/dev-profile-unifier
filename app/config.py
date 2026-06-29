@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     gemini_rate_limit_max_wait_seconds: float = 60.0
     gemini_day_reset_timezone: str = "America/Los_Angeles"
 
+    DASHBOARD_TOKEN: str | None = None
+
 
     @field_validator("app_name")
     @classmethod

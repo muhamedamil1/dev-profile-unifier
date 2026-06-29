@@ -45,6 +45,33 @@ class DevProfileUnifierError(Exception):
         return payload
 
 
+
+class AppError(DevProfileUnifierError):
+    code = "application_error"
+    status_code = 400
+    public_message = "Application request could not be completed."
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        public_message: str | None = None,
+        details: dict[str, Any] | None = None,
+        status_code: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        self.public_message = public_message or message
+        if status_code is not None:
+            self.status_code = status_code
+        if code is not None:
+            self.code = code
+        super().__init__(message, details=details)
+
+    def to_response(self, request_id: str | None = None) -> dict[str, Any]:
+        payload = super().to_response(request_id=request_id)
+        payload["error"]["message"] = self.public_message
+        return payload
+
 class SettingsError(DevProfileUnifierError):
     code = "settings_error"
     status_code = 500
