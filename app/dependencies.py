@@ -39,6 +39,13 @@ from app.storage.source_accounts_repo import SourceAccountsRepo
 
 from app.services.canonical_profile_service import CanonicalProfileService
 
+from app.llm.gemini_client import GeminiClient
+from app.services.summary_service import SummaryService
+from app.storage.metrics_repo import MetricsRepo
+from app.storage.resolution_runs_repo import ResolutionRunsRepo
+from app.storage.summaries_repo import SummariesRepo
+
+
 def _secret_value(value: SecretStr | None) -> str | None:
     if value is None:
         return None
@@ -174,4 +181,44 @@ def get_canonical_profile_service() -> CanonicalProfileService:
         profiles_repo=get_profiles_repo(),
         source_accounts_repo=get_source_accounts_repo(),
         resolution_runs_repo=get_resolution_runs_repo(),
+    )
+
+
+
+
+def _first_setting(settings, *names: str, default=None):
+    for name in names:
+        value = getattr(settings, name, None)
+        if value:
+            return value
+    return default
+
+
+def get_summary_service() -> SummaryService:
+    settings = get_settings()
+
+    api_key = _first_setting(
+        settings,
+        "gemini_api_key",
+        "google_gemini_api_key",
+        "google_api_key",
+        "GEMINI_API_KEY",
+    )
+    model_name = _first_setting(
+        settings,
+        "gemini_model",
+        "gemini_model_name",
+        default="gemini-1.5-flash",
+    )
+
+    
+    return SummaryService(
+        profiles_repo=ProfilesRepo(),
+        summaries_repo=SummariesRepo(),
+        metrics_repo=MetricsRepo(),
+        resolution_runs_repo=ResolutionRunsRepo(),
+        gemini_client=GeminiClient(
+            api_key=api_key,
+            model_name=model_name,
+        ),
     )
