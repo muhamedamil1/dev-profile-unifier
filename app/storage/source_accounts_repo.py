@@ -62,3 +62,15 @@ class SourceAccountsRepo(BaseRepository):
             operation="list_by_source_and_handle",
         )
         return data if isinstance(data, list) else []
+    def list_by_ids(self, source_account_ids: list[UUID | str]) -> list[dict]:
+        ids = [str(item) for item in source_account_ids if item]
+
+        if not ids:
+            return []
+
+        return self._execute(
+            self.client.table(self.table_name)
+            .select("*")
+            .in_("id", ids),
+            operation="list_source_accounts_by_ids",
+        )

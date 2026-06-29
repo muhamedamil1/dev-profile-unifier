@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from uuid import UUID
+from datetime import UTC, datetime
 
 from app.schemas.classification import AccountClassification
 from app.schemas.enums import (
@@ -340,3 +341,70 @@ class ProfilesRepo(BaseRepository):
             "blocking_conflict_types": item.blocking_conflict_types,
             "metadata": item.metadata,
         }
+
+    def get_by_id(self, profile_id: UUID | str) -> dict | None:
+        data = self._execute(
+            self.client.table(self.table_name)
+            .select("*")
+            .eq("id", str(profile_id))
+            .limit(1),
+            operation="get_canonical_profile_by_id",
+        )
+
+        return self._first_or_none(data)
+
+    def get_by_resolution_run_id(self, resolution_run_id: UUID | str) -> dict | None:
+        data = self._execute(
+            self.client.table(self.table_name)
+            .select("*")
+            .eq("resolution_run_id", str(resolution_run_id))
+            .limit(1),
+            operation="get_canonical_profile_by_resolution_run_id",
+        )
+
+        return self._first_or_none(data)
+
+    def list_source_links_for_profile(self, profile_id: UUID | str) -> list[dict]:
+        return self._execute(
+            self.client.table("profile_source_links")
+            .select("*")
+            .eq("profile_id", str(profile_id))
+            .order("created_at"),
+            operation="list_profile_source_links_for_profile",
+        )
+
+    def update_canonical_profile_fields(
+        self,
+        *,
+        profile_id: UUID | str,
+        display_name: str | None,
+        headline: str | None,
+        location: str | None,
+        bio: str | None,
+        primary_avatar_url: str | None,
+        primary_website_url: str | None,
+        inferred_skills: list[str],
+        confidence_level: str,
+        profile_payload: dict[str, Any],
+    ) -> dict:
+        payload = {
+            "display_name": display_name,
+            "headline": headline,
+            "location": location,
+            "bio": bio,
+            "primary_avatar_url": primary_avatar_url,
+            "primary_website_url": primary_website_url,
+            "inferred_skills": inferred_skills,
+            "confidence_level": confidence_level,
+            "profile_payload": profile_payload,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+
+        clean_payload = self._serialize_payload(payload, strip_none=False)
+        data = self._execute(
+            self.client.table(self.table_name)
+            .update(clean_payload)
+            .eq("id", str(profile_id)),
+            operation="update_canonical_profile_fields",
+        )
+        return self._require_one(data, operation="update_canonical_profile_fields")

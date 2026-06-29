@@ -162,6 +162,21 @@ class ResolutionRunsRepo(BaseRepository):
 
         return self._update_by_id(str(resolution_run_id), payload)
 
+
+    def merge_result_summary(
+        self,
+        *,
+        resolution_run_id: UUID | str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing = self.get_by_id(resolution_run_id) or {}
+        summary = existing.get("result_summary") if isinstance(existing.get("result_summary"), dict) else {}
+        merged_summary = {**summary, **patch}
+        return self._update_by_id(
+            str(resolution_run_id),
+            {"result_summary": merged_summary},
+        )
+
     def _duration_ms_from_started_at(self, row: dict[str, Any]) -> int | None:
         started_at = row.get("started_at")
         if not started_at:
