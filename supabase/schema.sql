@@ -478,6 +478,9 @@ create table if not exists profile_source_links (
 
     has_high_conflict     boolean not null default false,
 
+    decision_payload      jsonb not null default '{}'::jsonb
+                          check (jsonb_typeof(decision_payload) = 'object'),
+
     created_at            timestamptz not null default now(),
 
     unique (profile_id, source_account_id),
@@ -540,6 +543,12 @@ create index if not exists idx_profile_source_links_decision
 
 create index if not exists idx_profile_source_links_confidence
     on profile_source_links(confidence_score desc);
+
+alter table resolution_runs
+add column if not exists result_summary jsonb not null default '{}'::jsonb;
+
+alter table profile_source_links
+add column if not exists decision_payload jsonb not null default '{}'::jsonb;
 
 -- ─────────────────────────────────────────────
 -- 6. match_evidence
