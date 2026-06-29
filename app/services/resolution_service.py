@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from app.resolution.classifier import DecisionClassifier
+from app.resolution.ambiguity_reviewer import GeminiAmbiguityReviewer
 from app.resolution.conflict_detector import ConflictDetector
 from app.resolution.evidence import EvidenceExtractor
 from app.resolution.scorer import ResolutionScorer
@@ -41,7 +42,7 @@ class ResolutionService:
     It does not:
     - build canonical profile fields
     - extract profile facts
-    - call Gemini
+    - let Gemini decide merges before deterministic classification
     - expose API routes
     """
 
@@ -57,11 +58,13 @@ class ResolutionService:
         profiles_repo: ProfilesRepo,
         source_accounts_repo: SourceAccountsRepo,
         resolution_runs_repo: ResolutionRunsRepo,
+        ambiguity_reviewer: GeminiAmbiguityReviewer | None = None,
     ) -> None:
         self.evidence_extractor = evidence_extractor
         self.conflict_detector = conflict_detector
         self.scorer = scorer
         self.classifier = classifier
+        self.ambiguity_reviewer = ambiguity_reviewer
 
         self.evidence_repo = evidence_repo
         self.conflicts_repo = conflicts_repo
@@ -125,6 +128,20 @@ class ResolutionService:
             scoring_result=scoring_result,
         )
 
+        review_batch = None
+        review_outcome_by_key = {}
+        if self.ambiguity_reviewer is not None:
+            review_batch = self.ambiguity_reviewer.run_reviews(
+                accounts=accounts_for_pipeline,
+                classification_result=classification_result,
+                scoring_result=scoring_result,
+                evidence_result=evidence_result,
+                conflict_result=conflict_result,
+                resolution_run_id=run_uuid,
+                persist_metrics=True,
+            )
+            review_outcome_by_key = review_batch.outcome_by_key
+
         summary = self._build_summary(
             request=request,
             accounts=accounts_for_pipeline,
@@ -144,8 +161,13 @@ class ResolutionService:
                     evidence=evidence_result.evidence,
                     conflicts=conflict_result.conflicts,
                     classifications=classification_result.classifications,
+                    review_outcome_by_key=review_outcome_by_key,
                     summary=summary,
                     replace_existing=replace_existing,
+                )
+                self._patch_review_summary(
+                    resolution_run_id=run_uuid,
+                    review_batch=review_batch,
                 )
             except Exception as exc:
                 self._mark_run_failed_safely(
@@ -224,6 +246,7 @@ class ResolutionService:
         evidence: list[ExtractedEvidence],
         conflicts: list[DetectedConflict],
         classifications: list[AccountClassification],
+        review_outcome_by_key: dict[str, Any] | None = None,
         summary: dict[str, Any],
         replace_existing: bool,
     ) -> ResolutionPersistenceCounts:
@@ -277,6 +300,7 @@ class ResolutionService:
         link_rows = self.profiles_repo.insert_source_links_for_classifications(
             profile_id=canonical_profile_id,
             classifications=classifications,
+            review_outcome_by_key=review_outcome_by_key,
         )
         link_ids_by_account_id = {
             str(row["source_account_id"]): row["id"]
@@ -366,6 +390,29 @@ class ResolutionService:
             summary["no_profile_created_reason"] = "all_accounts_rejected"
 
         return summary
+
+    def _patch_review_summary(
+        self,
+        *,
+        resolution_run_id: UUID,
+        review_batch: Any,
+    ) -> None:
+        if not review_batch or not self.resolution_runs_repo:
+            return
+
+        patch = review_batch.result_summary_patch()
+        if hasattr(self.resolution_runs_repo, "update_result_summary_patch"):
+            self.resolution_runs_repo.update_result_summary_patch(
+                resolution_run_id=resolution_run_id,
+                patch=patch,
+            )
+            return
+
+        if hasattr(self.resolution_runs_repo, "merge_result_summary"):
+            self.resolution_runs_repo.merge_result_summary(
+                resolution_run_id=resolution_run_id,
+                patch=patch,
+            )
 
     def _validate_persistence_inputs(
         self,

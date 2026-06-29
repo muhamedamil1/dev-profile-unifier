@@ -46,6 +46,19 @@ from app.storage.resolution_runs_repo import ResolutionRunsRepo
 from app.storage.summaries_repo import SummariesRepo
 
 
+
+from app.config import get_settings
+from app.llm.gemini_client import GeminiClient
+from app.resolution.ambiguity_reviewer import GeminiAmbiguityReviewer
+from app.storage.metrics_repo import MetricsRepo
+
+from app.llm.gemini_client import GeminiClient, GeminiRetryConfig
+from app.llm.rate_limiter import GeminiRateLimitConfig, GeminiRateLimiter
+
+_SHARED_GEMINI_RATE_LIMITER: GeminiRateLimiter | None = None
+_SHARED_GEMINI_CLIENT: GeminiClient | None = None
+
+
 def _secret_value(value: SecretStr | None) -> str | None:
     if value is None:
         return None
@@ -173,6 +186,7 @@ def get_resolution_service() -> ResolutionService:
         profiles_repo=get_profiles_repo(),
         source_accounts_repo=get_source_accounts_repo(),
         resolution_runs_repo=get_resolution_runs_repo(),
+        ambiguity_reviewer=get_gemini_ambiguity_reviewer(),
     )
 
 
@@ -222,3 +236,105 @@ def get_summary_service() -> SummaryService:
             model_name=model_name,
         ),
     )
+
+
+
+def _first_setting(settings, *names: str, default=None):
+    for name in names:
+        value = getattr(settings, name, None)
+        if value:
+            return value
+    return default
+
+
+def get_gemini_ambiguity_reviewer() -> GeminiAmbiguityReviewer:
+    settings = get_settings()
+    api_key = _first_setting(
+        settings,
+        "gemini_api_key",
+        "google_gemini_api_key",
+        "google_api_key",
+        "GEMINI_API_KEY",
+    )
+    model_name = _first_setting(
+        settings,
+        "gemini_model",
+        "gemini_model_name",
+        "GEMINI_MODEL",
+        default="gemini-1.5-flash",
+    )
+
+    return GeminiAmbiguityReviewer(
+        gemini_client=GeminiClient(
+            api_key=api_key,
+            model_name=model_name,
+        ),
+        metrics_repo=MetricsRepo(),
+        settings=settings,
+    )
+
+
+
+def _first_setting(settings, *names: str, default=None):
+    for name in names:
+        value = getattr(settings, name, None)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def get_shared_gemini_rate_limiter() -> GeminiRateLimiter:
+    global _SHARED_GEMINI_RATE_LIMITER
+
+    if _SHARED_GEMINI_RATE_LIMITER is None:
+        settings = get_settings()
+        _SHARED_GEMINI_RATE_LIMITER = GeminiRateLimiter(
+            GeminiRateLimitConfig.from_settings(settings)
+        )
+
+    return _SHARED_GEMINI_RATE_LIMITER
+
+
+def get_gemini_client() -> GeminiClient:
+    global _SHARED_GEMINI_CLIENT
+
+    if _SHARED_GEMINI_CLIENT is None:
+        settings = get_settings()
+        api_key = _first_setting(
+            settings,
+            "gemini_api_key",
+            "google_gemini_api_key",
+            "google_api_key",
+            "GEMINI_API_KEY",
+        )
+        model_name = _first_setting(
+            settings,
+            "gemini_model",
+            "gemini_model_name",
+            "GEMINI_MODEL",
+            default="gemini-2.5-flash-lite",
+        )
+        timeout_seconds = float(_first_setting(
+            settings,
+            "gemini_timeout_seconds",
+            "GEMINI_TIMEOUT_SECONDS",
+            default=30.0,
+        ))
+
+        _SHARED_GEMINI_CLIENT = GeminiClient(
+            api_key=api_key,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+            retry_config=GeminiRetryConfig.from_settings(settings),
+            rate_limiter=get_shared_gemini_rate_limiter(),
+        )
+
+    return _SHARED_GEMINI_CLIENT
+
+
+def reset_shared_gemini_client_for_tests() -> None:
+    """Optional test helper. Do not call from request handlers."""
+    global _SHARED_GEMINI_CLIENT, _SHARED_GEMINI_RATE_LIMITER
+    _SHARED_GEMINI_CLIENT = None
+    _SHARED_GEMINI_RATE_LIMITER = None
+

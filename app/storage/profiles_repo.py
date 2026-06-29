@@ -5,6 +5,10 @@ from uuid import UUID
 from datetime import UTC, datetime
 
 from app.schemas.classification import AccountClassification
+from app.resolution.ambiguity_reviewer import (
+    final_link_fields_after_review,
+    merge_llm_review_into_decision_payload,
+)
 from app.schemas.enums import (
     MatchDecision,
     ProfileConfidenceLevel,
@@ -259,6 +263,7 @@ class ProfilesRepo(BaseRepository):
         canonical_profile_id: UUID | str | None = None,
         profile_id: UUID | str | None = None,
         classifications: list[AccountClassification],
+        review_outcome_by_key: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if not classifications:
             return []
@@ -268,18 +273,11 @@ class ProfilesRepo(BaseRepository):
             return []
 
         payloads = [
-            {
-                "profile_id": str(target_profile_id),
-                "source_account_id": str(item.source_account_id),
-                "confidence_score": item.decision_confidence_score,
-                "decision": item.decision.value,
-                "relationship_type": self._relationship_type_for_decision(item),
-                "verification_status": self._verification_status_for_decision(item),
-                "positive_signal_count": len(item.independent_positive_groups),
-                "negative_signal_count": len(item.conflict_types),
-                "has_high_conflict": bool(item.blocking_conflict_types),
-                "decision_payload": self._decision_payload(item),
-            }
+            self._source_link_payload(
+                target_profile_id=target_profile_id,
+                item=item,
+                review_outcome_by_key=review_outcome_by_key or {},
+            )
             for item in classifications
             if item.source_account_id is not None
         ]
@@ -293,6 +291,44 @@ class ProfilesRepo(BaseRepository):
             operation="insert_profile_source_links_for_classifications",
         )
         return data if isinstance(data, list) else []
+
+    def _source_link_payload(
+        self,
+        *,
+        target_profile_id: UUID | str,
+        item: AccountClassification,
+        review_outcome_by_key: dict[str, Any],
+    ) -> dict[str, Any]:
+        review_outcome = review_outcome_by_key.get(item.source_account_key)
+        original_relationship_type = self._relationship_type_for_decision(item)
+        original_verification_status = self._verification_status_for_decision(item)
+        link_fields = final_link_fields_after_review(
+            original_decision=item.decision.value,
+            original_relationship_type=original_relationship_type,
+            original_verification_status=original_verification_status,
+            original_confidence_score=self._deterministic_link_confidence(item),
+            outcome=review_outcome,
+        )
+        decision_payload = merge_llm_review_into_decision_payload(
+            self._decision_payload(item),
+            review_outcome,
+        )
+
+        return {
+            "profile_id": str(target_profile_id),
+            "source_account_id": str(item.source_account_id),
+            "confidence_score": link_fields["confidence_score"],
+            "decision": link_fields["decision"],
+            "relationship_type": link_fields["relationship_type"],
+            "verification_status": link_fields["verification_status"],
+            "positive_signal_count": len(item.independent_positive_groups),
+            "negative_signal_count": len(item.conflict_types),
+            "has_high_conflict": bool(item.blocking_conflict_types),
+            "decision_payload": decision_payload,
+        }
+
+    def _deterministic_link_confidence(self, item: AccountClassification) -> float:
+        return float(item.best_pair_score or item.account_score or 0.0)
 
     def _relationship_type_for_decision(self, item: AccountClassification) -> str:
         if item.decision == MatchDecision.AUTO_MATCH and item.is_anchor:
