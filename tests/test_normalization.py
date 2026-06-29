@@ -251,6 +251,28 @@ def test_normalize_run_isolates_normalizer_and_persistence_exceptions() -> None:
     assert result.warnings[0].details["error_type"] == "RuntimeError"
 
 
+def test_normalize_run_copies_persisted_id_to_source_account() -> None:
+    records = [
+        _record(
+            source="github",
+            source_record_type="github/profile",
+            source_user_id="583231",
+            handle="octocat",
+            raw_payload={},
+        )
+    ]
+    service = SourceAccountNormalizationService(
+        raw_records_repo=_RawRepo(records),
+        source_accounts_repo=_SourceAccountsRepo(),
+        github_normalizer=_PassthroughNormalizer(),
+    )
+
+    result = service.normalize_run(resolution_run_id=uuid4(), persist=True)
+
+    persisted_id = result.accounts[0].persisted_row["id"]
+    assert result.accounts[0].source_account.id == UUID(persisted_id)
+
+
 class _ExecuteResponse:
     data = [{"id": "persisted"}]
 

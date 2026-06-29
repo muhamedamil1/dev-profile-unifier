@@ -2,8 +2,13 @@
 minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 addopts = "-q"
+markers = [
+    "integration: tests that call external APIs and Supabase",
+]
+
 
 [tool.ruff]
 line-length = 100
