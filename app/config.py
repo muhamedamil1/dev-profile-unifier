@@ -54,6 +54,31 @@ class Settings(BaseSettings):
     stackexchange_key: SecretStr = SecretStr("")
     gemini_api_key: SecretStr = SecretStr("")
 
+    ENABLE_LLM_AMBIGUITY_REVIEW: bool = False
+    LLM_REVIEW_MIN_SCORE: float = 0.55
+    LLM_REVIEW_MAX_SCORE: float = 0.84
+    LLM_REVIEW_PROMOTION_MIN_SCORE: float = 0.72
+    LLM_REVIEW_PROMPT_VERSION: str = "identity_match_review_v1_2026_06_hardened"
+
+    #LLM client call
+    
+    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_timeout_seconds: float = 30.0
+    
+    gemini_max_retries: int = 2
+    gemini_retry_base_delay_seconds: float = 1.0
+    gemini_retry_max_delay_seconds: float = 8.0
+    gemini_retry_jitter_ratio: float = 0.2
+    
+    gemini_rate_limit_enabled: bool = True
+    gemini_requests_per_minute: int = 5
+    gemini_tokens_per_minute: int = 30_000
+    gemini_requests_per_day: int = 500
+    gemini_min_request_interval_seconds: float = 12.0
+    gemini_rate_limit_max_wait_seconds: float = 60.0
+    gemini_day_reset_timezone: str = "America/Los_Angeles"
+
+
     @field_validator("app_name")
     @classmethod
     def app_name_must_not_be_empty(cls, value: str) -> str:

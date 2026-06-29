@@ -7,8 +7,14 @@ from uuid import UUID
 from app.llm.gemini_client import (
     GeminiClient,
     GeminiClientError,
+    GeminiTextResult,
     estimate_gemini_cost_usd,
     estimate_tokens,
+)
+from app.llm.metadata import (
+    merge_llm_metric_metadata,
+    metadata_from_llm_error,
+    metadata_from_llm_result,
 )
 from app.llm.prompts import (
     SAFE_SOURCE_NOTE,
@@ -83,6 +89,10 @@ class SummaryService:
         used_fallback = False
         fallback_reason: str | None = None
 
+        llm_result: GeminiTextResult | None = None
+        llm_error: Exception | None = None
+        llm_metadata: dict[str, Any] = {}
+
         started = time.perf_counter()
 
         try:
@@ -90,6 +100,9 @@ class SummaryService:
                 raise GeminiClientError("Gemini API key is not configured.")
 
             generated = self.gemini_client.generate_text(prompt=prompt_text)
+            llm_result = generated
+            llm_metadata = metadata_from_llm_result(generated)
+
             raw_text = generated.text
             duration_ms = generated.duration_ms
             model_name = generated.model
@@ -103,20 +116,33 @@ class SummaryService:
             structured = parse_structured_summary_json(generated.text)
 
         except Exception as exc:
+            llm_error = exc
+            llm_metadata = metadata_from_llm_error(exc)
+
             if not allow_fallback:
                 if persist:
+                    metric_metadata = self._build_metric_metadata(
+                        profile=profile,
+                        model_name=model_name,
+                        prompt_version=SUMMARY_PROMPT_VERSION,
+                        used_fallback=False,
+                        fallback_reason=None,
+                        safety_flags=safety_flags,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        estimated_cost_usd=0.0,
+                        summary_row=None,
+                        result=llm_result,
+                        error=llm_error,
+                    )
+
                     self._record_metric(
                         profile=profile,
                         endpoint="gemini.generate_content",
-                        status_code=500,
+                        status_code=503 if isinstance(exc, GeminiClientError) else 500,
                         duration_ms=int((time.perf_counter() - started) * 1000),
                         error_message="Gemini summary generation failed.",
-                        metadata={
-                            "model": model_name,
-                            "prompt_version": SUMMARY_PROMPT_VERSION,
-                            "error_type": type(exc).__name__,
-                            "profile_id": str(profile["id"]),
-                        },
+                        metadata=metric_metadata,
                     )
                 raise
 
@@ -145,6 +171,7 @@ class SummaryService:
             used_fallback = True
             fallback_reason = fallback_reason or "ForbiddenClaimAfterSanitization"
             status_code = 502
+            error_message = "Gemini summary generation fell back after unsafe claim sanitization."
             output_tokens = estimate_tokens(structured.model_dump_json())
 
         structured = self._ensure_required_safety_note(structured)
@@ -191,24 +218,28 @@ class SummaryService:
                 safety_flags=safety_flags,
             )
 
+            metric_metadata = self._build_metric_metadata(
+                profile=profile,
+                model_name=model_name,
+                prompt_version=SUMMARY_PROMPT_VERSION,
+                used_fallback=used_fallback,
+                fallback_reason=fallback_reason,
+                safety_flags=safety_flags,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_usd=estimated_cost,
+                summary_row=summary_row,
+                result=llm_result,
+                error=llm_error,
+            )
+
             self._record_metric(
                 profile=profile,
                 endpoint="gemini.generate_content",
                 status_code=status_code,
                 duration_ms=duration_ms,
                 error_message=error_message if used_fallback else None,
-                metadata={
-                    "model": model_name,
-                    "prompt_version": SUMMARY_PROMPT_VERSION,
-                    "used_fallback": used_fallback,
-                    "fallback_reason": fallback_reason,
-                    "safety_flags": [flag.value for flag in safety_flags],
-                    "profile_id": str(profile["id"]),
-                    "summary_id": str(summary_row["id"]) if summary_row and summary_row.get("id") else None,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "estimated_cost_usd": estimated_cost,
-                },
+                metadata=metric_metadata,
             )
 
         return SummaryGenerationResult(
@@ -227,9 +258,48 @@ class SummaryService:
             persisted=bool(persist),
             used_fallback=used_fallback,
             metadata={
-                "profile_stage": (profile.get("profile_payload") or {}).get("profile_stage") if isinstance(profile.get("profile_payload"), dict) else None,
+                "profile_stage": (profile.get("profile_payload") or {}).get("profile_stage")
+                if isinstance(profile.get("profile_payload"), dict)
+                else None,
                 "fallback_reason": fallback_reason,
+                "llm_metadata": llm_metadata,
             },
+        )
+
+    def _build_metric_metadata(
+        self,
+        *,
+        profile: dict[str, Any],
+        model_name: str,
+        prompt_version: str,
+        used_fallback: bool,
+        fallback_reason: str | None,
+        safety_flags: list[SummarySafetyFlag],
+        input_tokens: int,
+        output_tokens: int,
+        estimated_cost_usd: float,
+        summary_row: dict[str, Any] | None,
+        result: GeminiTextResult | None,
+        error: Exception | None,
+    ) -> dict[str, Any]:
+        base_metadata = {
+            "feature": "profile_summary",
+            "model": model_name,
+            "prompt_version": prompt_version,
+            "used_fallback": used_fallback,
+            "fallback_reason": fallback_reason,
+            "safety_flags": [flag.value for flag in safety_flags],
+            "profile_id": str(profile["id"]),
+            "summary_id": str(summary_row["id"]) if summary_row and summary_row.get("id") else None,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "estimated_cost_usd": estimated_cost_usd,
+        }
+
+        return merge_llm_metric_metadata(
+            base_metadata,
+            result=result,
+            error=error,
         )
 
     def _ensure_profile_ready(self, profile: dict[str, Any]) -> None:

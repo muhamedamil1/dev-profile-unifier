@@ -1,1 +1,1 @@
-"""LLM integration package."""
+"""LLM integration package for Gemini-backed review and summary workflows."""
