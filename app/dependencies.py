@@ -26,6 +26,17 @@ from app.storage import (
     SummariesRepo,
     get_supabase_client,
 )
+from app.resolution.classifier import DecisionClassifier
+from app.resolution.conflict_detector import ConflictDetector
+from app.resolution.evidence import EvidenceExtractor
+from app.resolution.scorer import ResolutionScorer
+from app.services.resolution_service import ResolutionService
+from app.storage.conflicts_repo import ConflictsRepo
+from app.storage.evidence_repo import EvidenceRepo
+from app.storage.profiles_repo import ProfilesRepo
+from app.storage.resolution_runs_repo import ResolutionRunsRepo
+from app.storage.source_accounts_repo import SourceAccountsRepo
+
 
 
 def _secret_value(value: SecretStr | None) -> str | None:
@@ -142,4 +153,17 @@ def get_source_account_normalization_service() -> SourceAccountNormalizationServ
     return SourceAccountNormalizationService(
         raw_records_repo=get_raw_records_repo(),
         source_accounts_repo=get_source_accounts_repo(),
+    )
+
+def get_resolution_service() -> ResolutionService:
+    return ResolutionService(
+        evidence_extractor=EvidenceExtractor(),
+        conflict_detector=ConflictDetector(),
+        scorer=ResolutionScorer(),
+        classifier=DecisionClassifier(),
+        evidence_repo=get_evidence_repo(),
+        conflicts_repo=get_conflicts_repo(),
+        profiles_repo=get_profiles_repo(),
+        source_accounts_repo=get_source_accounts_repo(),
+        resolution_runs_repo=get_resolution_runs_repo(),
     )
