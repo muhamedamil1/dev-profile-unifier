@@ -37,7 +37,7 @@ from app.storage.profiles_repo import ProfilesRepo
 from app.storage.resolution_runs_repo import ResolutionRunsRepo
 from app.storage.source_accounts_repo import SourceAccountsRepo
 
-
+from app.services.canonical_profile_service import CanonicalProfileService
 
 def _secret_value(value: SecretStr | None) -> str | None:
     if value is None:
@@ -163,6 +163,14 @@ def get_resolution_service() -> ResolutionService:
         classifier=DecisionClassifier(),
         evidence_repo=get_evidence_repo(),
         conflicts_repo=get_conflicts_repo(),
+        profiles_repo=get_profiles_repo(),
+        source_accounts_repo=get_source_accounts_repo(),
+        resolution_runs_repo=get_resolution_runs_repo(),
+    )
+
+
+def get_canonical_profile_service() -> CanonicalProfileService:
+    return CanonicalProfileService(
         profiles_repo=get_profiles_repo(),
         source_accounts_repo=get_source_accounts_repo(),
         resolution_runs_repo=get_resolution_runs_repo(),
