@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 from uuid import UUID
 
@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.schemas.enums import MatchDecision, PlatformSource
 
 
-class DecisionBasis(StrEnum):
+class DecisionBasis(str, Enum):
     ANCHOR_INPUT = "anchor_input"
     STRONG_ANCHOR_PAIR = "strong_anchor_pair"
     AMBIGUOUS_ANCHOR_PAIR = "ambiguous_anchor_pair"
@@ -20,7 +20,7 @@ class DecisionBasis(StrEnum):
     REJECTED_WEAK_ONLY = "rejected_weak_only"
 
 
-class DecisionRiskLevel(StrEnum):
+class DecisionRiskLevel(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
