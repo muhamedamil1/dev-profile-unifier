@@ -80,6 +80,9 @@ class FakeSourceAccountsRepo:
         self.get_by_key_calls.append(key)
         return self.rows_by_key.get(key)
 
+    def list_by_ids(self, account_ids):
+        return [{"id": str(account_id)} for account_id in account_ids]
+
 
 class FakeEvidenceRepo:
     def __init__(self, fail_insert: bool = False) -> None:
@@ -87,24 +90,24 @@ class FakeEvidenceRepo:
         self.delete_calls = 0
         self.fail_insert = fail_insert
 
-    def delete_by_run(self, resolution_run_id):
+    def delete_for_profile(self, profile_id):
         self.delete_calls += 1
         before = len(self.rows)
-        self.rows = [row for row in self.rows if row["resolution_run_id"] != str(resolution_run_id)]
-        return before - len(self.rows)
+        self.rows = []
+        return before
 
-    def insert_many_for_run(self, *, resolution_run_id, evidence, profile_source_link_ids_by_account_id=None):
+    def insert_many_for_profile_links(self, *, evidence, source_link_by_account_id):
         if self.fail_insert:
             raise RuntimeError("raw db exploded")
         start = len(self.rows)
-        link_map = profile_source_link_ids_by_account_id or {}
         for index, item in enumerate(evidence):
             source_id = str(item.source_account_id) if item.source_account_id else None
+            if source_id is None or source_id not in source_link_by_account_id:
+                continue
             self.rows.append(
                 {
                     "id": str(uuid4()),
-                    "resolution_run_id": str(resolution_run_id),
-                    "profile_source_link_id": str(link_map[source_id]) if source_id in link_map else None,
+                    "profile_source_link_id": str(source_link_by_account_id[source_id]),
                     "source_account_a_id": source_id,
                     "signal_type": item.evidence_type.value,
                     "index": start + index,
@@ -118,21 +121,20 @@ class FakeConflictsRepo:
         self.rows: list[dict] = []
         self.delete_calls = 0
 
-    def delete_by_run(self, resolution_run_id):
+    def delete_for_profile(self, profile_id):
         self.delete_calls += 1
         before = len(self.rows)
-        self.rows = [row for row in self.rows if row["resolution_run_id"] != str(resolution_run_id)]
+        self.rows = [row for row in self.rows if row.get("profile_id") != str(profile_id)]
         return before - len(self.rows)
 
-    def insert_many_for_run(self, *, resolution_run_id, conflicts, profile_id=None):
+    def insert_many_for_profile(self, *, profile_id, conflicts):
         start = len(self.rows)
         for item in conflicts:
             self.rows.append(
                 {
                     "id": str(uuid4()),
-                    "resolution_run_id": str(resolution_run_id),
-                    "profile_id": str(profile_id) if profile_id else None,
-                    "field_name": item.conflict_type.value,
+                    "profile_id": str(profile_id),
+                    "field_name": item.metadata.get("conflict_basis") or item.conflict_type.value,
                 }
             )
         return self.rows[start:]
@@ -171,20 +173,27 @@ class FakeProfilesRepo:
         self.links_by_profile[profile_id] = []
         return count
 
-    def insert_source_links_for_classifications(self, *, canonical_profile_id, classifications):
+    def insert_source_links_for_classifications(self, *, canonical_profile_id=None, profile_id=None, classifications):
+        target_profile_id = str(profile_id if profile_id is not None else canonical_profile_id)
         rows = []
         for item in classifications:
             row = {
                 "id": str(uuid4()),
-                "profile_id": str(canonical_profile_id),
+                "profile_id": target_profile_id,
                 "source_account_id": str(item.source_account_id),
                 "decision": item.decision.value,
                 "relationship_type": _relationship_for(item),
                 "verification_status": _verification_for(item),
                 "confidence_score": item.decision_confidence_score,
+                "decision_payload": {
+                    "decision_basis": item.decision_basis.value,
+                    "rationale": item.rationale,
+                    "hn_conservative": item.hn_conservative,
+                    "weak_signal_only": item.weak_signal_only,
+                },
             }
             rows.append(row)
-        self.links_by_profile[str(canonical_profile_id)] = rows
+        self.links_by_profile[target_profile_id] = rows
         return rows
 
     def delete_by_id(self, profile_id):
@@ -226,7 +235,7 @@ def _verification_for(item: AccountClassification) -> str:
     if item.decision == MatchDecision.AUTO_MATCH and item.is_anchor:
         return "claimed_by_input"
     if item.decision == MatchDecision.AUTO_MATCH:
-        return "likely_same_person"
+        return "evidence_matched"
     if item.decision == MatchDecision.NEEDS_REVIEW:
         return "needs_review"
     return "rejected"
@@ -338,6 +347,7 @@ def test_resolution_service_successful_persistence():
     assert runs_repo.finalized[-1]["summary"]["canonical_profile_id"] == str(result.canonical_profile_id)
     links = profiles_repo.links_by_profile[str(result.canonical_profile_id)]
     assert {row["relationship_type"] for row in links} == {"primary", "secondary", "possible_alias"}
+    assert all(row["decision_payload"]["decision_basis"] for row in links)
 
 
 def test_resolution_service_idempotent_rerun_reuses_profile_and_counts():
@@ -363,6 +373,39 @@ def test_resolution_service_idempotent_rerun_reuses_profile_and_counts():
     assert second.persistence.canonical_profile_reused is True
     assert second.persistence.match_evidence_rows == first.persistence.match_evidence_rows == 2
     assert second.persistence.profile_source_link_rows == first.persistence.profile_source_link_rows == 2
+    assert len(service.evidence_repo.rows) == 2
+
+
+def test_resolution_service_hn_weak_decision_payload_preserves_safety_flags():
+    github = _account(PlatformSource.GITHUB, "amil", uuid4())
+    hn = _account(PlatformSource.HACKERNEWS, "amil", uuid4())
+    hn_classification = _classification(hn, MatchDecision.REJECT, score=0.12).model_copy(
+        update={
+            "decision_basis": DecisionBasis.REJECTED_WEAK_ONLY,
+            "weak_signal_only": True,
+            "hn_conservative": True,
+            "hn_requires_strong_evidence": True,
+            "rationale": ["HN handle-only evidence is too weak."],
+        }
+    )
+    classifications = [
+        _classification(github, MatchDecision.AUTO_MATCH, score=0.25, anchor=True),
+        hn_classification,
+    ]
+    service, profiles_repo, _ = _service(accounts=[github, hn], classifications=classifications)
+
+    result = service.resolve(
+        resolution_run_id=uuid4(),
+        request=ProfileResolveRequest(name="Amil", github="amil"),
+        accounts=[github, hn],
+    )
+
+    links = profiles_repo.links_by_profile[str(result.canonical_profile_id)]
+    hn_link = next(row for row in links if row["source_account_id"] == str(hn.id))
+    assert hn_link["decision"] == "reject"
+    assert hn_link["decision_payload"]["hn_conservative"] is True
+    assert hn_link["decision_payload"]["weak_signal_only"] is True
+
 
 
 def test_resolution_service_all_rejected_creates_no_profile_or_links():
