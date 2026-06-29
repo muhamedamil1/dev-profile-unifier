@@ -189,6 +189,9 @@ create table if not exists resolution_runs (
     source_errors       jsonb not null default '[]'::jsonb
                         check (jsonb_typeof(source_errors) = 'array'),
 
+    result_summary      jsonb not null default '{}'::jsonb
+                        check (jsonb_typeof(result_summary) = 'object'),
+
     created_at          timestamptz not null default now(),
 
     constraint resolution_runs_completed_after_started
@@ -510,8 +513,11 @@ create table if not exists profile_source_links (
             decision <> 'auto_match'
             or (
                 confidence_score >= 0.85
-                and positive_signal_count >= 2
                 and has_high_conflict = false
+                and (
+                    positive_signal_count >= 2
+                    or verification_status = 'claimed_by_input'
+                )
             )
         )
 );
@@ -542,7 +548,9 @@ create index if not exists idx_profile_source_links_confidence
 create table if not exists match_evidence (
     id                      uuid primary key default gen_random_uuid(),
 
-    profile_source_link_id  uuid not null references profile_source_links(id) on delete cascade,
+    resolution_run_id       uuid references resolution_runs(id) on delete cascade,
+
+    profile_source_link_id  uuid references profile_source_links(id) on delete cascade,
 
     -- Optional account IDs make pairwise evidence traceable.
     source_account_a_id     uuid references source_accounts(id) on delete set null,
@@ -575,11 +583,20 @@ create table if not exists match_evidence (
             (direction = 'negative' and signal_weight < 0)
             or
             (direction = 'neutral' and signal_weight = 0)
+        ),
+
+    constraint match_evidence_audit_anchor_present
+        check (
+            profile_source_link_id is not null
+            or resolution_run_id is not null
         )
 );
 
 comment on table match_evidence is
 'Individual evidence items explaining why a source account was matched, reviewed, or rejected.';
+
+create index if not exists idx_match_evidence_run_id
+    on match_evidence(resolution_run_id);
 
 create index if not exists idx_match_evidence_link_id
     on match_evidence(profile_source_link_id);
@@ -600,7 +617,9 @@ create index if not exists idx_match_evidence_source_accounts
 create table if not exists profile_conflicts (
     id              uuid primary key default gen_random_uuid(),
 
-    profile_id      uuid not null references canonical_profiles(id) on delete cascade,
+    resolution_run_id uuid references resolution_runs(id) on delete cascade,
+
+    profile_id      uuid references canonical_profiles(id) on delete cascade,
 
     field_name      text not null check (length(trim(field_name)) > 0),
     severity        conflict_severity not null,
@@ -612,11 +631,20 @@ create table if not exists profile_conflicts (
 
     explanation     text not null check (length(trim(explanation)) > 0),
 
-    created_at      timestamptz not null default now()
+    created_at      timestamptz not null default now(),
+
+    constraint profile_conflicts_audit_anchor_present
+        check (
+            profile_id is not null
+            or resolution_run_id is not null
+        )
 );
 
 comment on table profile_conflicts is
 'Conflicting field values found across linked source accounts. Used for transparency and confidence reduction.';
+
+create index if not exists idx_profile_conflicts_run_id
+    on profile_conflicts(resolution_run_id);
 
 create index if not exists idx_profile_conflicts_profile_id
     on profile_conflicts(profile_id);
