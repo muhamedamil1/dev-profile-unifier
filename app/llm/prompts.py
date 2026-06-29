@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from uuid import UUID
 
@@ -84,8 +85,8 @@ def build_profile_summary_prompt(prompt_payload: SummaryPromptPayload) -> str:
         "Use ONLY the JSON facts provided below. Do not infer employment, credentials, seniority, or account ownership.\n"
         "Never say verified, proven, guaranteed, confirmed owner, owns the account, or any equivalent ownership claim.\n"
         "Use safe language such as 'appears to', 'public profile data suggests', and 'based on accepted source accounts'.\n"
-        "Do not use review_candidates or rejected_candidates as factual sources; only mention limitations generically if useful.\n"
-        "Do not name, list, or describe review/rejected candidate accounts.\n"
+        "Do not use accounts requiring review or rejected accounts as factual sources; mention limitations only generically if useful.\n"
+        "Do not name, list, or describe accounts outside the accepted source set.\n"
         "Return valid JSON only, with exactly these keys and no extra keys:\n"
         "headline: string\n"
         "short_summary: string\n"
@@ -170,7 +171,10 @@ def structured_summary_text(summary: StructuredProfileSummary) -> str:
 
 def text_contains_forbidden_claims(text: str) -> bool:
     lowered = text.lower()
-    return any(phrase in lowered for phrase in FORBIDDEN_CLAIM_PHRASES)
+    return any(
+        re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", lowered) is not None
+        for phrase in FORBIDDEN_CLAIM_PHRASES
+    )
 
 
 def sanitize_forbidden_claims(summary: StructuredProfileSummary) -> tuple[StructuredProfileSummary, bool]:

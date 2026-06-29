@@ -111,6 +111,8 @@ class GeminiClient:
         random_func: Callable[[], float] | None = None,
         generate_content_callable: Callable[[str], Any] | None = None,
     ) -> None:
+        if hasattr(api_key, "get_secret_value"):
+            api_key = api_key.get_secret_value()
         self.api_key = (api_key or "").strip() or None
         self.model_name = model_name
         self.timeout_seconds = max(0.1, float(timeout_seconds or 30.0))
