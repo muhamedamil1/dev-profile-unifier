@@ -198,7 +198,23 @@ class ResolutionService:
 
             persisted.append(account.model_copy(update={"id": UUID(str(row["id"]))}))
 
-        return self._sort_accounts(persisted)
+        sorted_accounts = self._sort_accounts(persisted)
+        self._validate_source_account_ids_exist(sorted_accounts)
+        return sorted_accounts
+
+    def _validate_source_account_ids_exist(self, accounts: list[SourceAccount]) -> None:
+        account_ids = [account.id for account in accounts if account.id is not None]
+        if not account_ids:
+            return
+
+        rows = self.source_accounts_repo.list_by_ids(account_ids)
+        found_ids = {str(row["id"]) for row in rows if row.get("id")}
+        missing_ids = [str(account_id) for account_id in account_ids if str(account_id) not in found_ids]
+        if missing_ids:
+            raise ResolutionFailedError(
+                "A normalized account was not persisted before resolution.",
+                details={"missing_source_account_ids": missing_ids},
+            )
 
     def _persist_resolution(
         self,
@@ -221,22 +237,10 @@ class ResolutionService:
         # Supabase REST writes here are not transactional. A Postgres RPC that
         # validates, replaces, inserts, and finalizes in one DB transaction is
         # the production-hardening path if this workflow grows more complex.
-        if replace_existing:
-            self.evidence_repo.delete_by_run(resolution_run_id)
-            self.conflicts_repo.delete_by_run(resolution_run_id)
-
         if not usable_classification:
             if replace_existing:
                 self._delete_existing_profile_for_run(resolution_run_id)
 
-            evidence_rows = self.evidence_repo.insert_many_for_run(
-                resolution_run_id=resolution_run_id,
-                evidence=evidence,
-            )
-            conflict_rows = self.conflicts_repo.insert_many_for_run(
-                resolution_run_id=resolution_run_id,
-                conflicts=conflicts,
-            )
             final_summary = {
                 **summary,
                 "canonical_profile_id": None,
@@ -249,8 +253,8 @@ class ResolutionService:
                 summary=final_summary,
             )
             return ResolutionPersistenceCounts(
-                match_evidence_rows=len(evidence_rows),
-                profile_conflict_rows=len(conflict_rows),
+                match_evidence_rows=0,
+                profile_conflict_rows=0,
                 profile_source_link_rows=0,
                 canonical_profile_created=False,
                 canonical_profile_reused=False,
@@ -266,10 +270,12 @@ class ResolutionService:
         canonical_profile_id = UUID(str(profile_row["id"]))
 
         if replace_existing:
+            self.evidence_repo.delete_for_profile(canonical_profile_id)
+            self.conflicts_repo.delete_for_profile(canonical_profile_id)
             self.profiles_repo.delete_source_links_for_profile(canonical_profile_id)
 
         link_rows = self.profiles_repo.insert_source_links_for_classifications(
-            canonical_profile_id=canonical_profile_id,
+            profile_id=canonical_profile_id,
             classifications=classifications,
         )
         link_ids_by_account_id = {
@@ -278,16 +284,14 @@ class ResolutionService:
             if row.get("source_account_id") and row.get("id")
         }
 
-        evidence_rows = self.evidence_repo.insert_many_for_run(
-            resolution_run_id=resolution_run_id,
+        evidence_rows = self.evidence_repo.insert_many_for_profile_links(
             evidence=evidence,
-            profile_source_link_ids_by_account_id=link_ids_by_account_id,
+            source_link_by_account_id=link_ids_by_account_id,
         )
 
-        conflict_rows = self.conflicts_repo.insert_many_for_run(
-            resolution_run_id=resolution_run_id,
-            conflicts=conflicts,
+        conflict_rows = self.conflicts_repo.insert_many_for_profile(
             profile_id=canonical_profile_id,
+            conflicts=conflicts,
         )
 
         final_summary = {
@@ -433,9 +437,12 @@ class ResolutionService:
         if not existing or not existing.get("id"):
             return
 
-        self.profiles_repo.delete_source_links_for_profile(existing["id"])
+        profile_id = existing["id"]
+        self.evidence_repo.delete_for_profile(profile_id)
+        self.conflicts_repo.delete_for_profile(profile_id)
+        self.profiles_repo.delete_source_links_for_profile(profile_id)
         if hasattr(self.profiles_repo, "delete_by_id"):
-            self.profiles_repo.delete_by_id(existing["id"])
+            self.profiles_repo.delete_by_id(profile_id)
 
     def _sort_accounts(self, accounts: list[SourceAccount]) -> list[SourceAccount]:
         return sorted(accounts, key=lambda item: item.expected_source_account_key())
