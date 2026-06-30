@@ -45,7 +45,6 @@ AUTO_BLOCKING_CONFLICT_TYPES = {
 REJECT_STRONG_CONFLICT_TYPES = {
     "email_conflict",
     "name_conflict",
-    "website_conflict",
 }
 
 
@@ -624,10 +623,6 @@ class DecisionClassifier:
         if "email_conflict" in conflict_types and self._has_email_hash_conflict(pair_score):
             return True
 
-        if {"name_conflict", "website_conflict"} <= conflict_types:
-            if pair_score.confidence_score < 0.60:
-                return True
-
         if len(conflict_types & REJECT_STRONG_CONFLICT_TYPES) >= 2:
             if pair_score.confidence_score < 0.50:
                 return True
@@ -766,7 +761,6 @@ class DecisionClassifier:
             for pair_score in anchor_pairs
             if self._has_auto_blocking_conflict(pair_score)
             or self._should_reject_from_conflicts(pair_score)
-            or (pair_score.conflict_count > 0 and pair_score.confidence_score < 0.60)
         ]
 
         if not blocking:
@@ -806,7 +800,7 @@ class DecisionClassifier:
                 problematic.append(pair_score)
                 continue
 
-            if pair_score.conflict_count > 0 and pair_score.confidence_score < 0.60:
+            if self._should_reject_from_conflicts(pair_score):
                 problematic.append(pair_score)
 
         if not problematic:

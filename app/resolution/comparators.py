@@ -829,7 +829,7 @@ def profile_fingerprint(url: Any) -> str | None:
     if host == "hn.algolia.com" and len(path_parts) >= 2 and path_parts[0].lower() == "user":
         return f"hackernews:{path_parts[1].lower()}"
 
-    return normalized
+    return None
 
 
 def profile_link_match(outbound_links: list[str], target_profile_url: Any) -> LinkMatch:

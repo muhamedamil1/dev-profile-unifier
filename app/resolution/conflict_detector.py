@@ -8,6 +8,7 @@ from app.resolution.comparators import (
     classify_name_compatibility,
     compare_locations,
     normalized_domain,
+    profile_link_match,
 )
 from app.schemas.conflicts import (
     CONFLICT_PENALTIES,
@@ -175,17 +176,26 @@ class ConflictDetector:
         if left_domain == right_domain:
             return None
 
+        if (
+            self._website_points_to_profile(left.website_url, right)
+            or self._website_points_to_profile(right.website_url, left)
+        ):
+            return None
+
         return self._make_conflict(
             conflict_type=ConflictType.WEBSITE_CONFLICT,
-            severity=ConflictSeverity.MEDIUM,
+            severity=ConflictSeverity.LOW,
+            penalty=-0.05,
             left=left,
             right=right,
-            description="Accounts list different non-platform website domains.",
+            description="Accounts list different personal website domains; treated as weak identity tension only.",
             metadata={
                 "left_website_url": left.website_url,
                 "right_website_url": right.website_url,
                 "left_domain": left_domain,
                 "right_domain": right_domain,
+                "weak_identity_signal": True,
+                "non_blocking": True,
                 "conflict_basis": "website_domain",
                 "normalized_value": f"{left_domain}:{right_domain}",
             },
@@ -221,6 +231,16 @@ class ConflictDetector:
                 "normalized_value": f"{comparison.left_normalized}:{comparison.right_normalized}",
             },
         )
+
+    def _website_points_to_profile(
+        self,
+        website_url: str | None,
+        target: SourceAccount,
+    ) -> bool:
+        if not website_url or not target.profile_url:
+            return False
+
+        return profile_link_match([website_url], target.profile_url).matched
 
     def _email_conflict(
         self,
