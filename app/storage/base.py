@@ -153,7 +153,29 @@ class BaseRepository:
             .eq("id", str(row_id)),
             operation="update_by_id",
         )
-        return self._require_one(data, operation="update_by_id")
+
+        row = self._first_or_none(data)
+        if row is not None:
+            return row
+
+        # Some PostgREST/Supabase deployments can apply an UPDATE successfully
+        # but return an empty response body when the query does not explicitly
+        # request representation. Treat that as a read-after-write situation,
+        # not as a failed persistence operation. This is important for Render
+        # production, where resolution_runs PATCH returned HTTP 200 but empty
+        # data, causing the resolver to mark a successfully saved run as failed.
+        refreshed = self._get_by_id(row_id)
+        if refreshed is not None:
+            return refreshed
+
+        raise StorageError(
+            "Database operation returned no rows: update_by_id",
+            details={
+                "table": self.table_name,
+                "operation": "update_by_id",
+                "row_id": str(row_id),
+            },
+        )
 
     def _get_by_id(self, row_id: str | UUID) -> dict[str, Any] | None:
         data = self._execute(
