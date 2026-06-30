@@ -87,12 +87,6 @@ class ResolutionService:
     ) -> ResolutionPipelineResult:
         started = perf_counter()
         run_uuid = UUID(str(resolution_run_id))
-
-        if not accounts:
-            raise ResolutionFailedError(
-                "No normalized source accounts were available for resolution."
-            )
-
         try:
             accounts_for_pipeline = (
                 self._ensure_persisted_accounts(accounts)
@@ -255,41 +249,15 @@ class ResolutionService:
         summary: dict[str, Any],
         replace_existing: bool,
     ) -> ResolutionPersistenceCounts:
-        usable_classification = self._has_usable_classification(classifications)
         self._validate_persistence_inputs(
             evidence=evidence,
             conflicts=conflicts,
-            classifications=classifications if usable_classification else [],
+            classifications=classifications,
         )
 
         # Supabase REST writes here are not transactional. A Postgres RPC that
         # validates, replaces, inserts, and finalizes in one DB transaction is
         # the production-hardening path if this workflow grows more complex.
-        if not usable_classification:
-            if replace_existing:
-                self._delete_existing_profile_for_run(resolution_run_id)
-
-            final_summary = {
-                **summary,
-                "canonical_profile_id": None,
-                "canonical_profile_pending": False,
-                "no_profile_created_reason": "all_accounts_rejected",
-            }
-            self.resolution_runs_repo.finalize_resolution(
-                resolution_run_id=resolution_run_id,
-                status=self._resolution_status_for_summary(final_summary),
-                summary=final_summary,
-            )
-            return ResolutionPersistenceCounts(
-                match_evidence_rows=0,
-                profile_conflict_rows=0,
-                profile_source_link_rows=0,
-                canonical_profile_created=False,
-                canonical_profile_reused=False,
-                canonical_profile_upserted=False,
-                canonical_profile_id=None,
-            )
-
         profile_row, created = self.profiles_repo.create_resolution_shell(
             resolution_run_id=resolution_run_id,
             request=request,
@@ -388,11 +356,35 @@ class ResolutionService:
             "max_decision_confidence_score": round(max_decision_score, 4),
             "confidence_level": self._confidence_level(max_evidence_score),
             "confidence_policy": "anchor_floor_separated_from_evidence_score",
-            "canonical_profile_pending": has_usable_classification,
+            "canonical_profile_pending": True,
+            "canonical_profile_trusted": bool(auto_keys),
         }
 
-        if not has_usable_classification:
-            summary["no_profile_created_reason"] = "all_accounts_rejected"
+        if not accounts:
+            summary.update(
+                {
+                    "outcome": "no_candidates_found",
+                    "confidence_level": "uncertain",
+                    "canonical_profile_trusted": False,
+                }
+            )
+        elif not has_usable_classification:
+            summary.update(
+                {
+                    "outcome": "no_confident_match",
+                    "canonical_profile_trusted": False,
+                    "no_profile_created_reason": "all_accounts_rejected",
+                }
+            )
+        elif not auto_keys:
+            summary.update(
+                {
+                    "outcome": "ambiguous_candidates",
+                    "canonical_profile_trusted": False,
+                }
+            )
+        else:
+            summary["outcome"] = "resolved"
 
         return summary
 
@@ -488,7 +480,11 @@ class ResolutionService:
         return "uncertain"
 
     def _resolution_status_for_summary(self, summary: dict[str, Any]) -> ResolutionStatus:
-        if summary.get("has_review_items") or summary.get("has_rejections"):
+        if (
+            summary.get("has_review_items")
+            or summary.get("has_rejections")
+            or summary.get("canonical_profile_trusted") is False
+        ):
             return ResolutionStatus.PARTIAL
 
         return ResolutionStatus.RESOLVED

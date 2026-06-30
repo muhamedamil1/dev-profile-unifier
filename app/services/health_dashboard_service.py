@@ -376,11 +376,13 @@ class HealthDashboardService:
         api_totals = HealthDashboardService._llm_api_totals(gemini_rows)
 
         total_calls = api_totals["total_calls"] or summary_totals["total_calls"]
-        successful_calls = api_totals["successful_calls"] or summary_totals["total_calls"]
-        failed_calls = api_totals["failed_calls"]
+        successful_calls = api_totals["successful_calls"] or summary_totals["successful_calls"]
+        failed_calls = api_totals["failed_calls"] or summary_totals["failed_calls"]
         input_tokens = summary_totals["input_tokens"] or api_totals["input_tokens"]
         output_tokens = summary_totals["output_tokens"] or api_totals["output_tokens"]
         estimated_cost_usd = summary_totals["estimated_cost_usd"] or api_totals["estimated_cost_usd"]
+        retry_count = api_totals["retry_count"] or summary_totals["retry_count"]
+        rate_limit_wait_ms = api_totals["rate_limit_wait_ms"] or summary_totals["rate_limit_wait_ms"]
 
         return LLMMetrics(
             total_calls=int(total_calls),
@@ -389,30 +391,49 @@ class HealthDashboardService:
             input_tokens=int(input_tokens),
             output_tokens=int(output_tokens),
             estimated_cost_usd=float(estimated_cost_usd),
-            retry_count=int(api_totals["retry_count"]),
-            rate_limit_wait_ms=int(api_totals["rate_limit_wait_ms"]),
+            retry_count=int(retry_count),
+            rate_limit_wait_ms=int(rate_limit_wait_ms),
         )
 
     @staticmethod
     def _llm_summary_totals(llm_rows: list[dict[str, Any]], llm_summary_rows: list[dict[str, Any]]) -> dict[str, float | int]:
         if llm_summary_rows:
+            total_calls = len(llm_summary_rows)
+            failed_calls = sum(1 for row in llm_summary_rows if _metric_failed(row))
             return {
-                "total_calls": len(llm_summary_rows),
+                "total_calls": total_calls,
+                "successful_calls": max(total_calls - failed_calls, 0),
+                "failed_calls": failed_calls,
                 "input_tokens": sum(int_value(row.get("input_tokens")) for row in llm_summary_rows),
                 "output_tokens": sum(int_value(row.get("output_tokens")) for row in llm_summary_rows),
                 "estimated_cost_usd": sum(float_value(row.get("estimated_cost_usd")) for row in llm_summary_rows),
+                "retry_count": sum(int_value(row.get("retry_count"), row.get("total_retry_count")) for row in llm_summary_rows),
+                "rate_limit_wait_ms": sum(int_value(row.get("rate_limit_wait_ms"), row.get("total_rate_limit_wait_ms")) for row in llm_summary_rows),
             }
 
         if llm_rows:
             row = llm_rows[0]
             return {
                 "total_calls": int_value(row.get("total_calls"), row.get("call_count"), row.get("summaries_generated")),
+                "successful_calls": int_value(row.get("successful_calls"), row.get("success_count")),
+                "failed_calls": int_value(row.get("failed_calls"), row.get("failure_count"), row.get("errors")),
                 "input_tokens": int_value(row.get("input_tokens"), row.get("total_input_tokens")),
                 "output_tokens": int_value(row.get("output_tokens"), row.get("total_output_tokens")),
                 "estimated_cost_usd": float_value(row.get("estimated_cost_usd"), row.get("total_estimated_cost_usd")),
+                "retry_count": int_value(row.get("retry_count"), row.get("total_retry_count")),
+                "rate_limit_wait_ms": int_value(row.get("rate_limit_wait_ms"), row.get("total_rate_limit_wait_ms")),
             }
 
-        return {"total_calls": 0, "input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0}
+        return {
+            "total_calls": 0,
+            "successful_calls": 0,
+            "failed_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "estimated_cost_usd": 0.0,
+            "retry_count": 0,
+            "rate_limit_wait_ms": 0,
+        }
 
     @staticmethod
     def _llm_api_totals(gemini_rows: list[dict[str, Any]]) -> dict[str, float | int]:

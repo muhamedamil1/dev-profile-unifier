@@ -799,7 +799,7 @@ class DecisionClassifier:
                 problematic.append(pair_score)
                 continue
 
-            if pair_score.conflict_count > 0 and pair_score.confidence_score < 0.60:
+            if self._should_reject_from_conflicts(pair_score):
                 problematic.append(pair_score)
 
         if not problematic:
@@ -850,7 +850,8 @@ class DecisionClassifier:
         account belongs to the same person. When two or more direct anchors are
         present, an anchor must have either request-identity support
         (name/email) or account-pair corroboration with another anchor before it
-        can be accepted into the canonical profile.
+        can be accepted into the canonical profile. Uncorroborated anchors are
+        flagged in metadata; only blocking contradictions demote direct anchors.
         """
 
         if len(anchor_keys) <= 1:
@@ -867,25 +868,12 @@ class DecisionClassifier:
             pair_scores=pair_scores,
         )
         corroborating_pair = self._best_corroborating_anchor_pair(anchor_pairs)
-        best_available_pair = problematic_pair or corroborating_pair or self._best_pair_from_list(anchor_pairs)
-
         has_request_identity = self._has_request_identity_support(account_score)
-        other_request_identity_keys = self._other_anchor_keys_with_request_identity(
-            current_key=account_key,
-            anchor_keys=anchor_keys,
-            account_scores=account_scores,
-        )
 
         if problematic_pair is not None:
             other_key = self._other_account_key(account_key, problematic_pair)
             other_score = account_scores.get(other_key or "")
             other_has_request_identity = self._has_request_identity_support(other_score)
-
-            # If this anchor has request-name/email support and the conflicting
-            # anchor only has a direct identifier, keep this anchor accepted and
-            # let the lower-support conflicting anchor be held for review.
-            if has_request_identity and not other_has_request_identity:
-                return None
 
             conflict_types = self._conflict_types(problematic_pair)
             blocking_types = self._blocking_conflict_types(problematic_pair)
@@ -923,57 +911,7 @@ class DecisionClassifier:
         if has_request_identity:
             return None
 
-        if other_request_identity_keys:
-            return self._make_classification(
-                account=account,
-                decision=MatchDecision.NEEDS_REVIEW,
-                basis=DecisionBasis.AMBIGUOUS_ANCHOR_PAIR,
-                risk_level=DecisionRiskLevel.HIGH,
-                evidence_confidence_score=account_score.confidence_score,
-                decision_confidence_score=account_score.confidence_score,
-                account_score=account_score,
-                best_pair_score=best_available_pair,
-                is_anchor=True,
-                accepted_as_anchor=False,
-                conflict_types=self._conflict_types(best_available_pair),
-                blocking_conflict_types=self._blocking_conflict_types(best_available_pair),
-                rationale=[
-                    "This account was directly provided by the user, but another direct anchor has stronger request-identity evidence.",
-                    "No corroborating account-pair evidence connects this anchor to the stronger requested identity anchor.",
-                    "The system preserves it for review instead of accepting it into the canonical profile.",
-                ],
-                metadata={
-                    "anchor_policy": "multi_anchor_requires_request_identity_or_corroboration",
-                    "multi_anchor_gate": "failed_weaker_than_request_identity_anchor",
-                    "has_request_identity_support": False,
-                    "request_identity_anchor_keys": other_request_identity_keys,
-                },
-            )
-
-        return self._make_classification(
-            account=account,
-            decision=MatchDecision.NEEDS_REVIEW,
-            basis=DecisionBasis.AMBIGUOUS_ANCHOR_PAIR,
-            risk_level=DecisionRiskLevel.MEDIUM,
-            evidence_confidence_score=account_score.confidence_score,
-            decision_confidence_score=account_score.confidence_score,
-            account_score=account_score,
-            best_pair_score=best_available_pair,
-            is_anchor=True,
-            accepted_as_anchor=False,
-            conflict_types=self._conflict_types(best_available_pair),
-            blocking_conflict_types=self._blocking_conflict_types(best_available_pair),
-            rationale=[
-                "Multiple direct platform identifiers were provided, but this anchor has no request-name/email support and no corroborating account-pair evidence.",
-                "Direct input is user intent only; it is not enough to merge multiple accounts into one identity.",
-                "The account is preserved for review and excluded from accepted canonical sources.",
-            ],
-            metadata={
-                "anchor_policy": "multi_anchor_requires_request_identity_or_corroboration",
-                "multi_anchor_gate": "failed_uncorroborated_direct_anchor",
-                "has_request_identity_support": False,
-            },
-        )
+        return None
 
     def _has_request_identity_support(self, account_score: ConfidenceScore | None) -> bool:
         if account_score is None:

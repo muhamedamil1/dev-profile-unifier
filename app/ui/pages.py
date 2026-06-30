@@ -247,6 +247,7 @@ def render_profile_page(profile: Any) -> str:
     """
 
     summary_body = render_summary(ai_summary)
+    blocked_notice = render_blocked_profile_notice(data)
     sources_body = render_sources_table(sources, empty="No accepted sources were returned for this profile.")
     review_body = render_sources_table(review_candidates, empty="No ambiguous candidates require review.", review=True)
     rejected_body = render_sources_table(rejected_candidates, empty="No rejected candidates were returned.", rejected=True)
@@ -254,14 +255,34 @@ def render_profile_page(profile: Any) -> str:
     content = (
         header
         + warnings_panel(warnings)
+        + blocked_notice
         + card("AI summary", summary_body, subtitle="Grounded summary generated after deterministic profile building.")
-        + card("Accepted sources", sources_body, subtitle="Accounts merged into the canonical profile.")
+        + card("Accepted sources", sources_body, subtitle="Claimed-input sources are user-provided anchors; accepted as claimed input is not external ownership verification.")
         + card("Needs review", review_body, subtitle="Ambiguous candidates are not merged automatically.")
         + card("Rejected candidates", rejected_body, subtitle="Excluded from canonical fields and AI summaries.")
         + card("Raw profile JSON", json_details("Open raw profile response", data), subtitle="Useful for evaluator/debug inspection.")
     )
     return render_layout(title=str(display_name), active="resolve", content=content)
 
+
+def render_blocked_profile_notice(data: dict[str, Any]) -> str:
+    profile_stage = field(data, "profile_stage", default=None)
+    canonical_pending = field(data, "canonical_fields_pending", default=False)
+    resolution_summary = field(data, "resolution_summary", default={}) or {}
+    outcome = field(resolution_summary, "outcome", default="")
+
+    if profile_stage != "canonical_build_blocked" and canonical_pending is not True:
+        return ""
+
+    detail = "Review the candidates below before trusting this identity."
+    if outcome == "no_candidates_found":
+        detail = "No public candidate accounts were found for this request."
+
+    return card(
+        "No confident canonical profile yet",
+        f"<p>{h(detail)}</p>",
+        subtitle="Canonical fields are intentionally pending until deterministic evidence supports a merge.",
+    )
 
 def render_summary(summary: Any) -> str:
     data = to_plain(summary) or {}
@@ -293,14 +314,35 @@ def render_sources_table(rows: list[dict[str, Any]], *, empty: str, review: bool
         source = field(row, "source", "platform", default="unknown")
         handle = field(row, "handle", "source_account_key", default="—")
         decision = field(row, "decision", default="needs_review" if review else "reject" if rejected else "auto_match")
+        decision_payload = field(row, "decision_payload", default={}) or {}
+        verification_status = field(row, "verification_status", default="")
         confidence = field(row, "confidence_score", "score", default="—")
+        evidence_confidence = field(decision_payload, "evidence_confidence_score", "evidence_score_before_anchor_policy", default=None)
         profile_url = field(row, "profile_url", "url", default=None)
         reason = field(row, "reason", "rationale", "explanation", default="")
+
+        claimed_input = (
+            verification_status == "claimed_by_input"
+            or field(decision_payload, "decision_basis", default="") == "anchor_input"
+            or bool(field(decision_payload, "accepted_as_anchor", default=False))
+        )
+        decision_label = str(decision).replace("_", " ")
+        if claimed_input:
+            decision_label = f"{decision_label} / claimed input"
+            if not reason:
+                reason = "User provided this identifier; accepted as claimed input, not external ownership verification."
+            if source == "hackernews" and "Hacker News profiles are sparse" not in str(reason):
+                reason = f"{reason} Hacker News profiles are sparse, so this anchor remains conservative."
+
+        confidence_label = confidence
+        if evidence_confidence is not None and evidence_confidence != confidence:
+            confidence_label = f"{confidence} · evidence {evidence_confidence}"
+
         table_rows.append([
             badge_cell(source, str(source)),
             handle,
-            badge_cell(decision, str(decision)),
-            confidence,
+            badge_cell(decision_label, str(decision)),
+            confidence_label,
             link_cell(profile_url, "Open") if profile_url else "—",
             reason,
         ])
