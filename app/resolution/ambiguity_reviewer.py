@@ -53,6 +53,9 @@ REJECTION_SUPPORTING_CONFLICT_TYPES = {
     "website_conflict",
 }
 
+AUTO_MATCH_LINK_CONFIDENCE_FLOOR = 0.85
+
+
 BLOCKING_CONFLICT_HINTS = {
     "email_conflict",
     "name_conflict",
@@ -525,9 +528,9 @@ def final_link_fields_after_review(
 ) -> dict[str, Any]:
     """Return safe profile_source_links field values after Phase 7F review.
 
-    Promotion does not inflate confidence. The stored confidence remains the
-    deterministic score that existed before the LLM review. The LLM review only
-    changes decision/relationship metadata when deterministic guardrails allow it.
+    The stored link confidence represents the final persisted decision and must
+    satisfy the profile_source_links database contract. Raw deterministic evidence
+    scores remain in decision_payload for auditability.
     """
 
     decision = final_decision_after_review(original_decision, outcome)
@@ -544,6 +547,9 @@ def final_link_fields_after_review(
         relationship_type = "rejected"
         verification_status = "rejected"
         confidence_score = outcome.deterministic_score if outcome.deterministic_score else original_confidence_score
+
+    if decision == "auto_match" and confidence_score is not None:
+        confidence_score = max(confidence_score, AUTO_MATCH_LINK_CONFIDENCE_FLOOR)
 
     return {
         "decision": decision,
