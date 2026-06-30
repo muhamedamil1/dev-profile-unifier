@@ -124,9 +124,12 @@ class ProfileOrchestrationService:
         detail_payload = detail.model_dump()
         detail_payload["warnings"] = [*detail.warnings, *warnings]
         detail_payload["request"] = request.model_dump(mode="json")
+        result_summary = self._extract_result_summary(resolution_result)
         detail_payload["resolution_status"] = self._extract_resolution_status(resolution_result)
         detail_payload["resolution_duration_ms"] = duration_ms
-        detail_payload["raw_result_summary"] = self._extract_result_summary(resolution_result)
+        detail_payload["raw_result_summary"] = result_summary
+        detail_payload["outcome"] = result_summary.get("outcome")
+        detail_payload["message"] = self._message_for_outcome(result_summary)
         return ProfileResolveAPIResponse(**detail_payload)
 
     def _create_resolution_run(self, *, request: ProfileResolveRequest, persist: bool) -> str | UUID | None:
@@ -394,6 +397,20 @@ class ProfileOrchestrationService:
             if isinstance(value, dict):
                 return dict(value)
         return {}
+
+
+    @staticmethod
+    def _message_for_outcome(result_summary: dict[str, Any]) -> str | None:
+        outcome = result_summary.get("outcome")
+        if outcome in {"ambiguous_candidates", "no_confident_match"}:
+            return "Possible public accounts were found, but no confident canonical identity could be built."
+        if outcome == "no_candidates_found":
+            return "No public candidate accounts were found for this request."
+        if outcome == "partial":
+            return "A canonical profile was built and additional candidates were preserved for review."
+        if outcome == "resolved":
+            return "A canonical profile was built from trusted source matches."
+        return result_summary.get("outcome_reason") if isinstance(result_summary.get("outcome_reason"), str) else None
 
     @staticmethod
     def _get_value(obj: Any, key: str) -> Any:

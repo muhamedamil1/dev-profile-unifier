@@ -877,7 +877,16 @@ class CanonicalProfileService:
                     profile_url=bundle.profile_url,
                     decision=bundle.decision,
                     relationship_type=bundle.relationship_type,
+                    verification_status=clean_string(bundle.link.get("verification_status")),
                     confidence_score=bundle.confidence_score,
+                    decision_payload=dict(bundle.decision_payload),
+                    reason=self._source_reason(bundle),
+                    evidence_confidence_score=bundle.decision_payload.get("evidence_confidence_score"),
+                    decision_confidence_score=bundle.decision_payload.get("decision_confidence_score"),
+                    accepted_as_anchor=bool(bundle.decision_payload.get("accepted_as_anchor")) or bundle.is_anchor,
+                    hn_conservative=bool(bundle.decision_payload.get("hn_conservative")),
+                    decision_basis=clean_string(bundle.decision_payload.get("decision_basis")),
+                    risk_level=clean_string(bundle.decision_payload.get("risk_level")),
                     is_anchor=bundle.is_anchor,
                 )
             )
@@ -890,6 +899,39 @@ class CanonicalProfileService:
             ),
         )
 
+    def _source_reason(self, bundle: ProfileAccountBundle) -> str | None:
+        if (
+            bundle.source == "hackernews"
+            and (
+                clean_string(bundle.link.get("verification_status")) == "claimed_by_input"
+                or bundle.decision_payload.get("decision_basis") == "anchor_input"
+                or bundle.decision_payload.get("accepted_as_anchor")
+                or bundle.decision_payload.get("is_anchor")
+            )
+        ):
+            return (
+                "User provided this Hacker News handle; accepted as a claimed input anchor, "
+                "not external ownership verification. Hacker News profiles are sparse, so treat this conservatively unless stronger evidence is present."
+            )
+        rationale = bundle.decision_payload.get("rationale")
+        if isinstance(rationale, list):
+            for item in rationale:
+                text = clean_string(item)
+                if text:
+                    return text
+        text = clean_string(bundle.decision_payload.get("rationale"))
+        if text:
+            return text
+        metadata = bundle.decision_payload.get("metadata")
+        if isinstance(metadata, dict):
+            explanation = metadata.get("account_score_explanation")
+            if isinstance(explanation, list):
+                for item in explanation:
+                    text = clean_string(item)
+                    if text:
+                        return text
+            return clean_string(explanation)
+        return None
     def _build_review_candidates(
         self,
         bundles: list[ProfileAccountBundle],
@@ -1123,14 +1165,46 @@ class CanonicalProfileService:
 
         previous_payload = profile.get("profile_payload")
         base_payload = previous_payload if isinstance(previous_payload, dict) else {}
+        previous_summary = base_payload.get("resolution_summary")
+        previous_summary = previous_summary if isinstance(previous_summary, dict) else {}
+        outcome = self._uncertain_outcome(
+            previous_summary=previous_summary,
+            review_count=len(review_candidates),
+            rejected_count=len(rejected_candidates),
+            candidate_count=len(bundles),
+        )
+        outcome_reason = self._uncertain_outcome_reason(outcome)
+        blocked_reason = "no_candidates_found" if outcome == "no_candidates_found" else "no_auto_match_accounts"
+        resolution_summary = {
+            **previous_summary,
+            "outcome": outcome,
+            "outcome_reason": outcome_reason,
+            "candidate_count": len(bundles),
+            "auto_match_count": 0,
+            "needs_review_count": len(review_candidates),
+            "reject_count": len(rejected_candidates),
+            "canonical_profile_created": True,
+            "canonical_profile_trusted": False,
+        }
 
         profile_payload = {
             **base_payload,
             "profile_stage": "canonical_build_blocked",
+            "status": outcome,
+            "outcome": outcome,
             "phase": 8,
             "canonical_fields_pending": True,
             "canonical_builder_version": "canonical_builder_v1",
-            "blocked_reason": "no_auto_match_accounts",
+            "blocked_reason": blocked_reason,
+            "canonical_build_blocked_reason": blocked_reason,
+            "warnings": [
+                "Only ambiguous or untrusted candidates were found. Review sources before trusting this identity."
+            ] if outcome != "no_candidates_found" else [
+                "No public candidate accounts were found for this request."
+            ],
+            "resolution_summary": resolution_summary,
+            "accepted_account_keys": [],
+            "platform_profiles": [],
             "canonical_field_policy": {
                 "canonical_fields_from": "auto_match_accounts_only",
                 "needs_review_usage": "metadata_only",
@@ -1157,7 +1231,7 @@ class CanonicalProfileService:
             primary_avatar_url=None,
             primary_website_url=None,
             inferred_skills=[],
-            confidence_level="low",
+            confidence_level="uncertain",
             profile_payload=profile_payload,
         )
         self._patch_resolution_run_summary(
@@ -1165,7 +1239,10 @@ class CanonicalProfileService:
             patch={
                 "canonical_profile_built": False,
                 "canonical_profile_stage": "canonical_build_blocked",
-                "canonical_build_blocked_reason": "no_auto_match_accounts",
+                "canonical_build_blocked_reason": blocked_reason,
+                "outcome": outcome,
+                "outcome_reason": outcome_reason,
+                "canonical_profile_trusted": False,
             },
         )
 
@@ -1180,13 +1257,43 @@ class CanonicalProfileService:
             primary_avatar_url=updated.get("primary_avatar_url"),
             primary_website_url=updated.get("primary_website_url"),
             inferred_skills=updated.get("inferred_skills") or [],
-            confidence_level=updated.get("confidence_level") or "low",
+            confidence_level=updated.get("confidence_level") or "uncertain",
             review_candidates=review_candidates,
             rejected_candidates=rejected_candidates,
             activity_summary=activity_summary,
             profile_payload=profile_payload,
         )
 
+
+    def _uncertain_outcome(
+        self,
+        *,
+        previous_summary: dict[str, Any],
+        review_count: int,
+        rejected_count: int,
+        candidate_count: int,
+    ) -> str:
+        previous_outcome = str(previous_summary.get("outcome") or "").strip()
+        if previous_outcome in {"ambiguous_candidates", "no_confident_match", "no_candidates_found"}:
+            return previous_outcome
+        if candidate_count == 0:
+            return "no_candidates_found"
+        if review_count > 0:
+            return "ambiguous_candidates"
+        return "no_confident_match"
+
+    def _uncertain_outcome_reason(self, outcome: str) -> str:
+        if outcome == "no_candidates_found":
+            return "No public candidate accounts were found for the request."
+        if outcome == "ambiguous_candidates":
+            return (
+                "Possible public accounts were found, but none had enough evidence "
+                "to become a trusted canonical identity."
+            )
+        return (
+            "Candidate accounts were evaluated, but no source had enough trusted "
+            "evidence to create a canonical identity."
+        )
     def _patch_resolution_run_summary(
         self,
         *,
@@ -1466,3 +1573,5 @@ def display_skill_label(value: str) -> str:
         return " ".join(part.capitalize() for part in normalized.split("-"))
 
     return normalized.capitalize()
+
+
