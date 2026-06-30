@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID
 from datetime import UTC, datetime
@@ -17,11 +18,18 @@ from app.schemas.enums import (
 )
 from app.schemas.requests import ProfileResolveRequest
 from app.storage.base import BaseRepository
-from app.utils.errors import ProfileNotFoundError
+from app.utils.errors import ProfileNotFoundError, StorageError
 
 
 class ProfilesRepo(BaseRepository):
     table_name = "canonical_profiles"
+    _PROFILE_SOURCE_LINK_FALLBACK_COLUMNS = {
+        "decision_payload",
+        "positive_signal_count",
+        "negative_signal_count",
+        "has_high_conflict",
+        "verification_status",
+    }
 
     def create_profile(
         self,
@@ -286,11 +294,37 @@ class ProfilesRepo(BaseRepository):
             return []
 
         clean_payloads = [self._serialize_payload(payload) for payload in payloads]
-        data = self._execute(
-            self.client.table("profile_source_links").insert(clean_payloads),
-            operation="insert_profile_source_links_for_classifications",
-        )
+        data = self._insert_profile_source_links_with_fallback(clean_payloads)
         return data if isinstance(data, list) else []
+
+    def _insert_profile_source_links_with_fallback(
+        self,
+        payloads: list[dict[str, Any]],
+    ) -> Any:
+        current_payloads = payloads
+        removed_columns: set[str] = set()
+
+        while True:
+            try:
+                return self._execute(
+                    self.client.table("profile_source_links").insert(current_payloads),
+                    operation="insert_profile_source_links_for_classifications",
+                )
+            except StorageError as exc:
+                missing_column = self._missing_profile_source_links_column(exc)
+                if missing_column is None or missing_column in removed_columns:
+                    raise
+
+                removed_columns.add(missing_column)
+                current_payloads = [
+                    {
+                        key: value
+                        for key, value in payload.items()
+                        if key != missing_column
+                    }
+                    for payload in current_payloads
+                ]
+
 
     def _source_link_payload(
         self,
@@ -328,7 +362,7 @@ class ProfilesRepo(BaseRepository):
         }
 
     def _deterministic_link_confidence(self, item: AccountClassification) -> float:
-        return float(item.best_pair_score or item.account_score or 0.0)
+        return float(item.decision_confidence_score)
 
     def _relationship_type_for_decision(self, item: AccountClassification) -> str:
         if item.decision == MatchDecision.AUTO_MATCH and item.is_anchor:
@@ -444,3 +478,10 @@ class ProfilesRepo(BaseRepository):
             operation="update_canonical_profile_fields",
         )
         return self._require_one(data, operation="update_canonical_profile_fields")
+    def _missing_profile_source_links_column(self, exc: StorageError) -> str | None:
+        message = str(exc.internal_details.get("error", "")).lower()
+        for column in sorted(self._PROFILE_SOURCE_LINK_FALLBACK_COLUMNS):
+            if re.search(rf"\b{re.escape(column)}\b", message):
+                return column
+        return None
+

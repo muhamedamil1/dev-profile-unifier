@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from app.schemas.enums import ResolutionStatus
 from app.storage.base import BaseRepository
+from app.utils.errors import StorageError
 
 
 class ResolutionRunsRepo(BaseRepository):
     table_name = "resolution_runs"
+    _RUN_UPDATE_FALLBACK_COLUMNS = {
+        "result_summary",
+    }
 
     def create_run(
         self,
@@ -106,7 +111,7 @@ class ResolutionRunsRepo(BaseRepository):
             "result_summary": failed_summary,
         }
 
-        return self._update_by_id(target_run_id, payload)
+        return self._update_run_with_fallback(target_run_id, payload)
 
     def delete_by_id(self, resolution_run_id: UUID | str) -> int:
         data = self._execute(
@@ -160,7 +165,7 @@ class ResolutionRunsRepo(BaseRepository):
         if duration_ms is not None:
             payload["duration_ms"] = duration_ms
 
-        return self._update_by_id(str(resolution_run_id), payload)
+        return self._update_run_with_fallback(str(resolution_run_id), payload)
 
 
     def merge_result_summary(
@@ -172,10 +177,34 @@ class ResolutionRunsRepo(BaseRepository):
         existing = self.get_by_id(resolution_run_id) or {}
         summary = existing.get("result_summary") if isinstance(existing.get("result_summary"), dict) else {}
         merged_summary = {**summary, **patch}
-        return self._update_by_id(
-            str(resolution_run_id),
-            {"result_summary": merged_summary},
-        )
+        return self._update_run_with_fallback(str(resolution_run_id), {"result_summary": merged_summary})
+
+    def _update_run_with_fallback(
+        self,
+        row_id: str | UUID,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        current_payload = dict(payload)
+        removed_columns: set[str] = set()
+
+        while True:
+            try:
+                return self._update_by_id(row_id, current_payload)
+            except StorageError as exc:
+                missing_column = self._missing_run_update_column(exc)
+                if missing_column is None or missing_column in removed_columns:
+                    raise
+
+                removed_columns.add(missing_column)
+                current_payload.pop(missing_column, None)
+
+    def _missing_run_update_column(self, exc: StorageError) -> str | None:
+        message = str(exc.internal_details.get("error", "")).lower()
+        for column in sorted(self._RUN_UPDATE_FALLBACK_COLUMNS):
+            if re.search(rf"\b{re.escape(column)}\b", message):
+                return column
+        return None
+
 
     def _duration_ms_from_started_at(self, row: dict[str, Any]) -> int | None:
         started_at = row.get("started_at")
