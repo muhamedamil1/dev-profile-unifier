@@ -5,6 +5,7 @@ from uuid import UUID
 
 from app.schemas.enums import PlatformSource
 from app.storage.base import BaseRepository
+from app.utils.errors import StorageError
 
 
 class FactsRepo(BaseRepository):
@@ -43,7 +44,30 @@ class FactsRepo(BaseRepository):
             operation="upsert_fact",
         )
 
-        return self._require_one(data, operation="upsert_fact")
+        row = self._first_or_none(data)
+        if row is not None:
+            return row
+
+        recovered = self.get_by_unique_fact(
+            profile_id=profile_id,
+            source=source,
+            fact_type=fact_type,
+            value=value,
+        )
+        if recovered is not None:
+            return recovered
+
+        raise StorageError(
+            "Database operation returned no rows: upsert_fact",
+            details={
+                "table": self.table_name,
+                "operation": "upsert_fact",
+                "profile_id": str(profile_id),
+                "source": str(source.value if hasattr(source, "value") else source),
+                "fact_type": fact_type,
+                "value": value,
+            },
+        )
 
     def upsert_many(self, facts: list[dict[str, Any]]) -> list[dict]:
         if not facts:
@@ -69,6 +93,27 @@ class FactsRepo(BaseRepository):
 
         return data if isinstance(data, list) else []
 
+
+    def get_by_unique_fact(
+        self,
+        *,
+        profile_id: str | UUID,
+        source: PlatformSource | str,
+        fact_type: str,
+        value: str,
+    ) -> dict | None:
+        source_value = source.value if isinstance(source, PlatformSource) else str(source)
+        data = self._execute(
+            self.client.table(self.table_name)
+            .select("*")
+            .eq("profile_id", str(profile_id))
+            .eq("source", source_value)
+            .eq("fact_type", fact_type)
+            .eq("value", value)
+            .limit(1),
+            operation="get_by_unique_fact",
+        )
+        return self._first_or_none(data)
     def list_by_profile(self, profile_id: str | UUID) -> list[dict]:
         data = self._execute(
             self.client.table(self.table_name)

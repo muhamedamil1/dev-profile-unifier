@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.schemas.enums import ResolutionStatus
 from app.storage.base import BaseRepository
@@ -25,6 +25,7 @@ class ResolutionRunsRepo(BaseRepository):
     ) -> dict[str, Any]:
         return self._insert_one(
             {
+                "id": str(uuid4()),
                 "input_name": input_name,
                 "input_payload": input_payload,
                 "status": ResolutionStatus.RUNNING.value,

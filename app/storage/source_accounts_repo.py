@@ -4,6 +4,7 @@ from uuid import UUID
 
 from app.schemas.source_account import SourceAccount
 from app.storage.base import BaseRepository
+from app.utils.errors import StorageError
 
 
 class SourceAccountsRepo(BaseRepository):
@@ -20,7 +21,22 @@ class SourceAccountsRepo(BaseRepository):
             operation="upsert_account",
         )
 
-        return self._require_one(data, operation="upsert_account")
+        row = self._first_or_none(data)
+        if row is not None:
+            return row
+
+        recovered = self.get_by_key(str(payload["source_account_key"]))
+        if recovered is not None:
+            return recovered
+
+        raise StorageError(
+            "Database operation returned no rows: upsert_account",
+            details={
+                "table": self.table_name,
+                "operation": "upsert_account",
+                "source_account_key": payload.get("source_account_key"),
+            },
+        )
 
     def get_by_id(self, account_id: str | UUID) -> dict | None:
         return self._get_by_id(account_id)

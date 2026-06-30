@@ -5,6 +5,7 @@ from uuid import uuid4
 from app.schemas.classification import AccountClassification, DecisionBasis, DecisionRiskLevel
 from app.schemas.enums import MatchDecision, PlatformSource
 from app.schemas.requests import ProfileResolveRequest
+from app.storage.facts_repo import FactsRepo
 from app.storage.profiles_repo import ProfilesRepo
 from app.storage.resolution_runs_repo import ResolutionRunsRepo
 from app.utils.errors import StorageError
@@ -42,6 +43,12 @@ class FakeQuery:
         self.payload = payload
         return self
 
+    def upsert(self, payload, *, on_conflict: str):
+        self.operation = "upsert"
+        self.payload = payload
+        self.on_conflict = on_conflict
+        return self
+
     def eq(self, key, value):
         self.filters.append(("eq", key, value))
         return self
@@ -55,9 +62,12 @@ class FakeClient:
         self.profile_link_insert_payloads = []
         self.profile_link_select_rows = []
         self.profile_link_insert_disconnects = 0
+        self.profile_link_empty_insert_response = False
         self.run_update_payloads = []
         self.canonical_profile_existing_row = None
         self.canonical_profile_update_payloads = []
+        self.fact_upsert_payloads = []
+        self.fact_select_row = None
 
     def table(self, table_name):
         return FakeQuery(action="table", table_name=table_name, client=self)
@@ -74,8 +84,17 @@ class FakeClient:
             first_payload = query.payload[0] if isinstance(query.payload, list) else query.payload
             if "decision_payload" in first_payload:
                 raise RuntimeError("Could not find the 'decision_payload' column of 'profile_source_links' in the schema cache")
+            if self.profile_link_empty_insert_response:
+                return FakeResponse([])
             return FakeResponse(query.payload)
 
+        if query.table_name == "profile_facts" and query.operation == "upsert":
+            self.fact_upsert_payloads.append(query.payload)
+            return FakeResponse([])
+        if query.table_name == "profile_facts" and query.operation == "select":
+            if self.fact_select_row is None:
+                return FakeResponse([])
+            return FakeResponse([self.fact_select_row])
         if query.table_name == "canonical_profiles" and query.operation == "select":
             if self.canonical_profile_existing_row is None:
                 return FakeResponse([])
@@ -253,3 +272,48 @@ def test_profiles_repo_existing_resolution_shell_reads_back_empty_update_respons
     assert row["display_name"] == "Simon Willison"
     assert row["headline"] is None
     assert client.canonical_profile_update_payloads[0]["headline"] is None
+
+def test_profile_source_link_empty_insert_response_reads_back_rows():
+    client = FakeClient()
+    client.profile_link_empty_insert_response = True
+    repo = ProfilesRepo(client)
+    payload = {
+        "profile_id": str(uuid4()),
+        "source_account_id": str(uuid4()),
+        "confidence_score": 0.85,
+        "decision": "auto_match",
+        "relationship_type": "primary",
+        "verification_status": "claimed_by_input",
+        "positive_signal_count": 1,
+        "negative_signal_count": 0,
+        "has_high_conflict": False,
+    }
+    client.profile_link_select_rows = [{"id": str(uuid4()), **payload}]
+
+    result = repo._insert_profile_source_links_with_fallback([payload])
+
+    assert result == client.profile_link_select_rows
+    assert len(client.profile_link_insert_payloads) == 1
+
+def test_facts_repo_reads_back_empty_upsert_response_by_unique_key():
+    client = FakeClient()
+    profile_id = uuid4()
+    client.fact_select_row = {
+        "id": str(uuid4()),
+        "profile_id": str(profile_id),
+        "source": "github",
+        "fact_type": "language",
+        "value": "python",
+    }
+    repo = FactsRepo(client)
+
+    row = repo.upsert_fact(
+        profile_id=profile_id,
+        source=PlatformSource.GITHUB,
+        fact_type="language",
+        value="python",
+    )
+
+    assert row == client.fact_select_row
+    assert client.fact_upsert_payloads[0]["profile_id"] == str(profile_id)
+    assert client.fact_upsert_payloads[0]["source"] == "github"

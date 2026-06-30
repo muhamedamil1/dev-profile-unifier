@@ -238,7 +238,24 @@ class BaseRepository:
             self.client.table(self.table_name).insert(clean_payload),
             operation="insert_one",
         )
-        return self._require_one(data, operation="insert_one")
+
+        row = self._first_or_none(data)
+        if row is not None:
+            return row
+
+        row_id = clean_payload.get("id")
+        if row_id:
+            refreshed = self._get_by_id(row_id)
+            if refreshed is not None:
+                return refreshed
+
+        raise StorageError(
+            "Database operation returned no rows: insert_one",
+            details={
+                "table": self.table_name,
+                "operation": "insert_one",
+            },
+        )
 
     def _insert_many(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not payloads:

@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.resolution.ambiguity_reviewer import (
     final_link_fields_after_review,
@@ -82,6 +82,7 @@ class ProfilesRepo(BaseRepository):
     ) -> dict[str, Any]:
         return self._insert_one(
             {
+                "id": str(uuid4()),
                 "resolution_run_id": resolution_run_id,
                 "display_name": display_name,
                 "headline": headline,
@@ -142,7 +143,23 @@ class ProfilesRepo(BaseRepository):
             self.client.table("profile_source_links").insert(clean_payload),
             operation="create_profile_source_link",
         )
-        return self._require_one(data, operation="create_profile_source_link")
+        row = self._first_or_none(data)
+        if row is not None:
+            return row
+
+        recovered = self._read_profile_source_links_after_uncertain_insert([clean_payload])
+        if self._has_all_profile_source_links([clean_payload], recovered):
+            return recovered[0]
+
+        raise StorageError(
+            "Database operation returned no rows: create_profile_source_link",
+            details={
+                "table": "profile_source_links",
+                "operation": "create_profile_source_link",
+                "profile_id": clean_payload.get("profile_id"),
+                "source_account_id": clean_payload.get("source_account_id"),
+            },
+        )
 
     def get_profile_source_links(
         self,
@@ -293,7 +310,7 @@ class ProfilesRepo(BaseRepository):
                 strip_none=False,
             ), False
 
-        return self._insert_one(payload), True
+        return self._insert_one({"id": str(uuid4()), **payload}), True
 
     def delete_source_links_for_profile(self, canonical_profile_id: UUID | str) -> int:
         data = self._execute(
@@ -726,9 +743,26 @@ class ProfilesRepo(BaseRepository):
             )
 
             try:
-                return self._execute(
+                data = self._execute(
                     self.client.table("profile_source_links").insert(current_payloads),
                     operation="insert_profile_source_links_for_classifications",
+                )
+                if isinstance(data, list) and data:
+                    return data
+
+                recovered = self._read_profile_source_links_after_uncertain_insert(current_payloads)
+                if self._has_all_profile_source_links(current_payloads, recovered):
+                    logger.warning(
+                        "profile_source_links insert returned no rows, but rows were found on readback."
+                    )
+                    return recovered
+
+                raise StorageError(
+                    "Database operation returned no rows: insert_profile_source_links_for_classifications",
+                    details={
+                        "table": "profile_source_links",
+                        "operation": "insert_profile_source_links_for_classifications",
+                    },
                 )
             except StorageError as exc:
                 if (

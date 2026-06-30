@@ -274,26 +274,48 @@ def test_normalize_run_copies_persisted_id_to_source_account() -> None:
 
 
 class _ExecuteResponse:
-    data = [{"id": "persisted"}]
+    def __init__(self, data=None) -> None:
+        self.data = data if data is not None else [{"id": "persisted"}]
 
 
 class _Query:
-    def __init__(self) -> None:
+    def __init__(self, client=None) -> None:
+        self.client = client
+        self.operation = "table"
         self.upsert_payload = None
         self.on_conflict = None
+        self.filters = []
 
     def upsert(self, payload: dict, *, on_conflict: str):
+        self.operation = "upsert"
         self.upsert_payload = payload
         self.on_conflict = on_conflict
         return self
 
+    def select(self, payload: str):
+        self.operation = "select"
+        return self
+
+    def eq(self, key: str, value: str):
+        self.filters.append((key, value))
+        return self
+
+    def limit(self, value: int):
+        return self
+
     def execute(self) -> _ExecuteResponse:
+        if self.client is not None and self.client.empty_upsert_response and self.operation == "upsert":
+            return _ExecuteResponse([])
+        if self.operation == "select" and self.client is not None and self.client.select_row is not None:
+            return _ExecuteResponse([self.client.select_row])
         return _ExecuteResponse()
 
 
 class _Client:
     def __init__(self) -> None:
-        self.query = _Query()
+        self.empty_upsert_response = False
+        self.select_row = None
+        self.query = _Query(self)
         self.table_name = None
 
     def table(self, table_name: str) -> _Query:
@@ -319,3 +341,19 @@ def test_source_accounts_repo_upsert_uses_source_account_key_conflict() -> None:
     assert client.query.on_conflict == "source_account_key"
     assert client.query.upsert_payload["source_account_key"] == "github:583231"
     assert client.query.upsert_payload["source"] == "github"
+
+def test_source_accounts_repo_reads_back_empty_upsert_response_by_key() -> None:
+    client = _Client()
+    client.empty_upsert_response = True
+    client.select_row = {"id": "persisted", "source_account_key": "github:583231"}
+    repo = SourceAccountsRepo(client)  # type: ignore[arg-type]
+    account = SourceAccount(
+        source=PlatformSource.GITHUB,
+        source_user_id="583231",
+        handle="octocat",
+    )
+
+    row = repo.upsert_account(account)
+
+    assert row == {"id": "persisted", "source_account_key": "github:583231"}
+    assert ("source_account_key", "github:583231") in client.query.filters

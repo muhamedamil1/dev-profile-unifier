@@ -164,6 +164,24 @@ def test_update_by_id_retries_transient_transport_disconnect(monkeypatch):
     ]
 
 
+def test_insert_one_reads_back_client_generated_id_when_insert_response_is_empty():
+    row_id = uuid4()
+    repo = ExampleRepo(
+        FakeClient(
+            insert_data=[],
+            fetched_row={"id": str(row_id), "status": "created"},
+        )
+    )
+
+    row = repo._insert_one({"id": row_id, "status": "created"})
+
+    assert row == {"id": str(row_id), "status": "created"}
+    assert repo.client.calls == [
+        ("example_table", "insert", {"id": str(row_id), "status": "created"}),
+        ("example_table", "select", "*"),
+    ]
+
+
 def test_insert_one_does_not_blindly_retry_uncertain_transient_write(monkeypatch):
     monkeypatch.setattr(storage_base.time, "sleep", lambda _seconds: None)
     repo = ExampleRepo(FakeClient(fail_insert_attempts=1))
