@@ -30,7 +30,16 @@ class CanonicalPlatformProfile(BaseModel):
     profile_url: str | None = None
     decision: str
     relationship_type: str | None = None
+    verification_status: str | None = None
     confidence_score: float = 0.0
+    decision_payload: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+    evidence_confidence_score: float | None = None
+    decision_confidence_score: float | None = None
+    accepted_as_anchor: bool | None = None
+    hn_conservative: bool | None = None
+    decision_basis: str | None = None
+    risk_level: str | None = None
     is_anchor: bool = False
 
 

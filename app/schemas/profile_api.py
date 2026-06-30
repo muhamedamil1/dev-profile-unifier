@@ -24,7 +24,17 @@ class ProfileSourceAPI(BaseModel):
     verification_status: str | None = None
     confidence_score: float | None = None
     decision: str | None = None
+    reason: str | None = None
+    rationale: str | None = None
+    decision_payload: dict[str, Any] = Field(default_factory=dict)
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
+    evidence_confidence_score: float | None = None
+    decision_confidence_score: float | None = None
+    accepted_as_anchor: bool | None = None
+    is_anchor: bool | None = None
+    hn_conservative: bool | None = None
+    decision_basis: str | None = None
+    risk_level: str | None = None
 
 
 class ReviewCandidateAPI(BaseModel):
@@ -80,6 +90,8 @@ class ProfileDetailResponse(BaseModel):
 
 class ProfileResolveAPIResponse(ProfileDetailResponse):
     request: dict[str, Any] | None = None
+    outcome: str | None = None
+    message: str | None = None
     resolution_status: str | None = None
     resolution_duration_ms: int | None = None
     raw_result_summary: dict[str, Any] = Field(default_factory=dict)
@@ -101,3 +113,4 @@ class ProfileResolveEnvelope(BaseModel):
 
     request: dict[str, Any]
     options: ProfileResolveOptions = Field(default_factory=ProfileResolveOptions)
+
