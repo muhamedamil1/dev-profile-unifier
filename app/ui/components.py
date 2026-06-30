@@ -79,12 +79,87 @@ def list_chips(values: list[Any] | None) -> str:
     return '<div class="chips">' + "".join(f'<span class="chip">{h(item)}</span>' for item in values[:12]) + '</div>'
 
 
+REVIEW_WARNING_CODES = {
+    "profile_needs_review",
+    "canonical_fields_pending",
+    "ambiguous_candidates_present",
+}
+
+
 def warnings_panel(warnings: list[Any] | None) -> str:
-    warnings = [str(item) for item in (warnings or []) if item]
-    if not warnings:
+    normalized = [_warning_to_plain(item) for item in (warnings or []) if item]
+    normalized = [item for item in normalized if item["message"] or item["code"]]
+    if not normalized:
         return ""
-    items = "".join(f'<div class="warning-item">{h(item)}</div>' for item in warnings)
+
+    review_warnings = [item for item in normalized if item["code"] in REVIEW_WARNING_CODES]
+    other_warnings = [item for item in normalized if item["code"] not in REVIEW_WARNING_CODES]
+
+    items = ""
+    if review_warnings:
+        items += _review_warning_item(review_warnings)
+
+    seen_messages = set()
+    for warning in other_warnings:
+        message = warning["message"] or warning["code"]
+        if message in seen_messages:
+            continue
+        seen_messages.add(message)
+        items += f'<div class="warning-item">{h(message)}</div>'
+
+    if not items:
+        return ""
     return card("Warnings", f'<div class="warning-list">{items}</div>', subtitle="Non-fatal issues returned by the API.")
+
+
+def _warning_to_plain(warning: Any) -> dict[str, Any]:
+    plain = to_plain(warning)
+    if isinstance(plain, dict):
+        details = plain.get("details")
+        return {
+            "code": str(plain.get("code") or ""),
+            "message": str(plain.get("message") or ""),
+            "details": details if isinstance(details, dict) else {},
+        }
+    return {"code": "", "message": str(plain or ""), "details": {}}
+
+
+def _review_warning_item(warnings: list[dict[str, Any]]) -> str:
+    count = _review_candidate_count(warnings)
+    if count is None:
+        body = (
+            "We found possible matching accounts, but the evidence was not strong enough "
+            "to automatically merge them. They were preserved for review and excluded "
+            "from factual canonical profile fields."
+        )
+    else:
+        possible_noun = "possible matching account" if count == 1 else "possible matching accounts"
+        candidate_noun = "candidate account" if count == 1 else "candidate accounts"
+        verb = "needs" if count == 1 else "need"
+        body = (
+            f"We found {count} {possible_noun}, but the evidence was not strong enough "
+            "to automatically merge them. "
+            f"{count} {candidate_noun} {verb} review and were excluded from factual canonical profile fields."
+        )
+    return f'<div class="warning-item"><strong>{h("Profile needs review")}</strong><p>{h(body)}</p></div>'
+
+
+def _review_candidate_count(warnings: list[dict[str, Any]]) -> int | None:
+    for warning in warnings:
+        details = warning.get("details") if isinstance(warning, dict) else None
+        if not isinstance(details, dict):
+            continue
+        for key in ("review_candidate_count", "count"):
+            value = details.get(key)
+            if isinstance(value, bool):
+                continue
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                return count
+    return None
 
 
 def dict_list(value: Any) -> list[dict[str, Any]]:
