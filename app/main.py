@@ -14,6 +14,8 @@ from fastapi.responses import JSONResponse
 from app.api import health, profiles
 from app.config import Settings, get_settings
 from app.utils.errors import DevProfileUnifierError
+from app.api import ui
+
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,8 @@ def create_app() -> FastAPI:
 def register_routes(app: FastAPI) -> None:
     app.include_router(health.router)
     app.include_router(profiles.router)
+    app.include_router(ui.router)
+
 
     @app.get("/", tags=["root"])
     async def root() -> dict[str, str]:
