@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
@@ -8,6 +10,42 @@ from uuid import UUID
 from supabase import Client
 
 from app.utils.errors import StorageError
+
+
+logger = logging.getLogger(__name__)
+
+TRANSIENT_STORAGE_ERROR_MARKERS = (
+    "server disconnected",
+    "remoteprotocolerror",
+    "connection reset",
+    "connection aborted",
+    "connection closed",
+    "connection refused",
+    "connection timed out",
+    "temporarily unavailable",
+    "network is unreachable",
+    "read timeout",
+    "write timeout",
+    "pool timeout",
+    "eof",
+)
+
+TRANSIENT_STORAGE_ERROR_TYPES = {
+    "connecterror",
+    "connecttimeout",
+    "networkerror",
+    "pooltimeout",
+    "readerror",
+    "readtimeout",
+    "remoteprotocolerror",
+    "timeout",
+    "timeoutexception",
+    "writeerror",
+    "writetimeout",
+}
+
+MAX_TRANSIENT_STORAGE_ATTEMPTS = 3
+TRANSIENT_STORAGE_RETRY_DELAYS_SECONDS = (0.15, 0.45)
 
 
 class BaseRepository:
@@ -67,23 +105,103 @@ class BaseRepository:
         return serialized
 
     def _execute(self, query: Any, *, operation: str) -> Any:
-        try:
-            response = query.execute()
-        except Exception as exc:
-            raise StorageError(
-                "Database operation failed.",
-                details={
-                    "table": self.table_name,
-                    "operation": operation,
-                },
-                internal_details={
-                    "table": self.table_name,
-                    "operation": operation,
-                    "error": str(exc),
-                },
-            ) from exc
+        max_attempts = (
+            MAX_TRANSIENT_STORAGE_ATTEMPTS
+            if self._operation_allows_transient_retry(operation)
+            else 1
+        )
+        attempt = 1
 
-        return getattr(response, "data", None)
+        while True:
+            try:
+                response = query.execute()
+                return getattr(response, "data", None)
+            except Exception as exc:
+                if attempt < max_attempts and self._is_transient_storage_exception(exc):
+                    delay = TRANSIENT_STORAGE_RETRY_DELAYS_SECONDS[
+                        min(attempt - 1, len(TRANSIENT_STORAGE_RETRY_DELAYS_SECONDS) - 1)
+                    ]
+                    logger.warning(
+                        "Transient Supabase storage error; retrying operation.",
+                        extra={
+                            "table": self.table_name,
+                            "operation": operation,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    time.sleep(delay)
+                    attempt += 1
+                    continue
+
+                raise StorageError(
+                    "Database operation failed.",
+                    details={
+                        "table": self.table_name,
+                        "operation": operation,
+                    },
+                    internal_details={
+                        "table": self.table_name,
+                        "operation": operation,
+                        "attempts": attempt,
+                        "retryable_operation": self._operation_allows_transient_retry(operation),
+                        "transient_error": self._is_transient_storage_exception(exc),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                ) from exc
+
+    @staticmethod
+    def _operation_allows_transient_retry(operation: str) -> bool:
+        normalized = str(operation or "").strip().lower()
+        if not normalized:
+            return False
+
+        if "insert" in normalized and "upsert" not in normalized:
+            return False
+
+        retryable_prefixes = (
+            "delete",
+            "get",
+            "list",
+            "merge",
+            "read",
+            "select",
+            "update",
+            "upsert",
+        )
+        return normalized.startswith(retryable_prefixes) or any(
+            token in normalized
+            for token in (
+                "_delete",
+                "_get",
+                "_list",
+                "_read",
+                "_update",
+                "_upsert",
+            )
+        )
+
+    @staticmethod
+    def _is_transient_storage_exception(exc: Exception) -> bool:
+        exc_type = type(exc).__name__.lower()
+        if exc_type in TRANSIENT_STORAGE_ERROR_TYPES:
+            return True
+
+        text_parts = [str(exc).lower()]
+        cause = getattr(exc, "__cause__", None)
+        if cause is not None:
+            text_parts.append(type(cause).__name__.lower())
+            text_parts.append(str(cause).lower())
+
+        context = getattr(exc, "__context__", None)
+        if context is not None:
+            text_parts.append(type(context).__name__.lower())
+            text_parts.append(str(context).lower())
+
+        text = " ".join(part for part in text_parts if part)
+        return any(marker in text for marker in TRANSIENT_STORAGE_ERROR_MARKERS)
 
     def _first_or_none(self, data: Any) -> dict[str, Any] | None:
         if data is None:
