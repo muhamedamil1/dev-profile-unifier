@@ -79,6 +79,20 @@ def test_profile_fingerprint_supports_platform_profile_urls() -> None:
     )
 
 
+def test_profile_fingerprint_normalizes_platform_profile_url_variants() -> None:
+    assert profile_fingerprint("https://dev.to/ben") == "devto:ben"
+    assert profile_fingerprint("http://dev.to/ben") == "devto:ben"
+    assert profile_fingerprint("https://www.dev.to/ben/") == "devto:ben"
+    assert profile_fingerprint("HTTPS://GitHub.com/BenHalpern/") == "github:benhalpern"
+    assert profile_fingerprint("https://github.com/benhalpern?utm_source=test") == "github:benhalpern"
+
+
+def test_profile_fingerprint_ignores_unsafe_and_non_platform_urls() -> None:
+    assert profile_fingerprint("javascript:alert(1)") is None
+    assert profile_fingerprint("https://exa mple.com") is None
+    assert profile_fingerprint("https://example.com/ben") is None
+
+
 def test_profile_link_match_detects_direct_profile_links() -> None:
     match = profile_link_match(
         outbound_links=[

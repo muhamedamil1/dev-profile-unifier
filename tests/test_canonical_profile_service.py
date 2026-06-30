@@ -241,13 +241,44 @@ def test_no_auto_match_blocked_clears_shell_fields():
     assert result.status == CanonicalBuildStatus.BLOCKED_NO_AUTO_MATCH
     assert result.display_name is None
     assert result.headline is None
-    assert result.confidence_level == "low"
+    assert result.confidence_level == "uncertain"
     assert result.inferred_skills == []
     assert result.profile_payload["profile_stage"] == "canonical_build_blocked"
     assert result.profile_payload["canonical_fields_pending"] is True
     assert result.profile_payload["blocked_reason"] == "no_auto_match_accounts"
+    assert result.profile_payload["outcome"] == "ambiguous_candidates"
+    assert result.profile_payload["resolution_summary"]["canonical_profile_trusted"] is False
     assert runs_repo.summary["canonical_profile_built"] is False
+    assert runs_repo.summary["outcome"] == "ambiguous_candidates"
 
+
+
+
+def test_no_candidates_shell_stays_uncertain_without_identity_fields():
+    profile = _profile(
+        display_name="Input Only Name",
+        payload={
+            "profile_stage": "resolution_shell",
+            "phase": "7E",
+            "resolution_summary": {"outcome": "no_candidates_found", "candidate_count": 0},
+        },
+    )
+    service, _profiles_repo, runs_repo = _service(profile, [], [])
+
+    result = service.build_by_profile_id(profile_id=profile["id"])
+
+    assert result.status == CanonicalBuildStatus.BLOCKED_NO_AUTO_MATCH
+    assert result.confidence_level == "uncertain"
+    assert result.display_name is None
+    assert result.bio is None
+    assert result.primary_avatar_url is None
+    assert result.primary_website_url is None
+    assert result.inferred_skills == []
+    assert result.review_candidates == []
+    assert result.rejected_candidates == []
+    assert result.profile_payload["outcome"] == "no_candidates_found"
+    assert result.profile_payload["canonical_build_blocked_reason"] == "no_candidates_found"
+    assert runs_repo.summary["outcome"] == "no_candidates_found"
 
 def test_hn_only_direct_anchor_does_not_become_high_confidence():
     profile = _profile(display_name=None)

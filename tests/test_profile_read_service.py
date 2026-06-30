@@ -91,3 +91,49 @@ def test_profile_read_service_raises_for_missing_profile():
 
     with pytest.raises(AppError):
         service.get_profile(uuid4())
+
+
+def test_profile_read_service_maps_no_auto_match_blocked_reason_to_review_warning():
+    profile = make_profile()
+    profile["profile_payload"]["profile_stage"] = "canonical_build_blocked"
+    profile["profile_payload"]["canonical_fields_pending"] = True
+    profile["profile_payload"]["canonical_build_blocked_reason"] = "no_auto_match_accounts"
+    profile["profile_payload"]["review_candidates"] = [
+        {"source_account_key": "github:maybe", "source": "github", "handle": "maybe"},
+        {"source_account_key": "devto:maybe", "source": "devto", "handle": "maybe"},
+    ]
+    service = ProfileReadService(
+        profiles_repo=FakeProfilesRepo(profile),
+        summaries_repo=FakeSummariesRepo(),
+    )
+
+    result = service.get_profile(profile["id"])
+
+    assert len(result.warnings) == 1
+    warning = result.warnings[0]
+    assert warning.code == "profile_needs_review"
+    assert warning.message == "No confident canonical profile was created. Review candidates before trusting this identity."
+    assert warning.details == {
+        "reason": "no_auto_match_accounts",
+        "review_candidate_count": 2,
+    }
+
+
+def test_profile_read_service_warning_response_shape_remains_compatible():
+    profile = make_profile()
+    profile["profile_payload"]["canonical_fields_pending"] = True
+    service = ProfileReadService(
+        profiles_repo=FakeProfilesRepo(profile),
+        summaries_repo=FakeSummariesRepo(),
+    )
+
+    result = service.get_profile(profile["id"])
+    payload = result.model_dump(mode="json")
+
+    assert isinstance(payload["warnings"], list)
+    assert payload["warnings"]
+    for warning in payload["warnings"]:
+        assert set(warning) == {"code", "message", "details"}
+        assert isinstance(warning["code"], str)
+        assert isinstance(warning["message"], str)
+        assert isinstance(warning["details"], dict)

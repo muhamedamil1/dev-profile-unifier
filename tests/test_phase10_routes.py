@@ -56,6 +56,23 @@ class FakeReadService:
         return ProfileDetailResponse(profile_id=profile_id, display_name="Muhammed Amil")
 
 
+
+class FakeUncertainOrchestrationService:
+    def resolve_profile(self, request, *, build_summary=True, allow_summary_fallback=True, persist=True):
+        profile_id = uuid4()
+        return ProfileResolveAPIResponse(
+            profile_id=profile_id,
+            display_name=None,
+            confidence_level="uncertain",
+            profile_stage="canonical_build_blocked",
+            canonical_fields_pending=True,
+            review_candidates=[{"source": "github", "handle": "possible", "decision": "needs_review", "confidence_score": 0.62}],
+            request=request.model_dump(mode="json"),
+            resolution_status="partial",
+            outcome="ambiguous_candidates",
+            message="Possible public accounts were found, but no confident canonical identity could be built.",
+            raw_result_summary={"outcome": "ambiguous_candidates", "auto_match_count": 0, "needs_review_count": 1},
+        )
 class FakeOrchestrationService:
     def resolve_profile(self, request, *, build_summary=True, allow_summary_fallback=True, persist=True):
         profile_id = uuid4()
@@ -136,3 +153,19 @@ def test_resolve_profile_route_returns_response(app_with_routes):
     assert payload["display_name"] == "Muhammed Amil"
     assert payload["request"] == {"name": "Muhammed Amil", "github": "amil122"}
     assert payload["resolution_status"] == "resolved"
+
+
+def test_resolve_profile_route_returns_200_for_uncertain_outcome(app_with_routes):
+    app, _deps, _health_module, profiles_module = app_with_routes
+    app.dependency_overrides[profiles_module.get_profile_orchestration_service] = lambda: FakeUncertainOrchestrationService()
+    client = TestClient(app)
+
+    response = client.post("/profiles/resolve", json={"name": "Ben Halpern"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile_id"]
+    assert payload["confidence_level"] == "uncertain"
+    assert payload["outcome"] == "ambiguous_candidates"
+    assert payload["message"] == "Possible public accounts were found, but no confident canonical identity could be built."
+    assert payload["review_candidates"][0]["decision_payload"] == {}

@@ -297,7 +297,7 @@ def _conflict(left: SourceAccount, right: SourceAccount) -> DetectedConflict:
 
 
 def _service(*, accounts, classifications, evidence=None, conflicts=None, evidence_repo=None, source_repo=None):
-    evidence = evidence if evidence is not None else [_evidence(accounts[0])]
+    evidence = evidence if evidence is not None else ([_evidence(accounts[0])] if accounts else [])
     conflicts = conflicts if conflicts is not None else []
     profiles_repo = FakeProfilesRepo()
     runs_repo = FakeResolutionRunsRepo()
@@ -305,7 +305,7 @@ def _service(*, accounts, classifications, evidence=None, conflicts=None, eviden
         evidence_extractor=StaticEvidenceExtractor(evidence),
         conflict_detector=StaticConflictDetector(conflicts),
         scorer=StaticScorer(),
-        classifier=StaticClassifier(classifications, anchors=[accounts[0].expected_source_account_key()]),
+        classifier=StaticClassifier(classifications, anchors=[accounts[0].expected_source_account_key()] if accounts else []),
         evidence_repo=evidence_repo or FakeEvidenceRepo(),
         conflicts_repo=FakeConflictsRepo(),
         profiles_repo=profiles_repo,
@@ -408,7 +408,7 @@ def test_resolution_service_hn_weak_decision_payload_preserves_safety_flags():
 
 
 
-def test_resolution_service_all_rejected_creates_no_profile_or_links():
+def test_resolution_service_all_rejected_creates_uncertain_shell_with_rejected_links():
     github = _account(PlatformSource.GITHUB, "amil", uuid4())
     hn = _account(PlatformSource.HACKERNEWS, "other", uuid4())
     classifications = [
@@ -428,13 +428,38 @@ def test_resolution_service_all_rejected_creates_no_profile_or_links():
         accounts=[github, hn],
     )
 
-    assert result.canonical_profile_id is None
-    assert result.persistence.profile_source_link_rows == 0
-    assert result.persistence.canonical_profile_created is False
-    assert profiles_repo.profiles_by_run == {}
-    assert runs_repo.finalized[-1]["summary"]["no_profile_created_reason"] == "all_accounts_rejected"
-    assert runs_repo.finalized[-1]["summary"]["canonical_profile_pending"] is False
+    assert result.canonical_profile_id is not None
+    assert result.persistence.profile_source_link_rows == 2
+    assert result.persistence.canonical_profile_created is True
+    assert profiles_repo.profiles_by_run
+    assert runs_repo.finalized[-1]["summary"]["outcome"] == "no_confident_match"
+    assert runs_repo.finalized[-1]["summary"]["canonical_profile_trusted"] is False
+    assert runs_repo.finalized[-1]["summary"]["canonical_profile_pending"] is True
 
+
+
+
+def test_resolution_service_no_candidates_creates_controlled_uncertain_shell():
+    service, profiles_repo, runs_repo = _service(
+        accounts=[],
+        classifications=[],
+        evidence=[],
+        conflicts=[],
+    )
+
+    result = service.resolve(
+        resolution_run_id=uuid4(),
+        request=ProfileResolveRequest(name="Some Very Unlikely Developer Name That Should Not Exist"),
+        accounts=[],
+    )
+
+    assert result.canonical_profile_id is not None
+    assert result.persistence.profile_source_link_rows == 0
+    assert result.summary["outcome"] == "no_candidates_found"
+    assert result.summary["confidence_level"] == "uncertain"
+    assert profiles_repo.profiles_by_run
+    assert runs_repo.finalized[-1]["status"] == "partial"
+    assert runs_repo.finalized[-1]["summary"]["canonical_profile_trusted"] is False
 
 def test_resolution_service_persist_false_performs_zero_writes():
     account = _account(PlatformSource.GITHUB, "amil")

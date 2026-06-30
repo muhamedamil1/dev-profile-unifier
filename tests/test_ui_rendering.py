@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.ui.components import warnings_panel
 from app.ui.pages import render_dashboard_page, render_profile_page, render_resolve_page
 
 
@@ -167,3 +168,98 @@ def test_profile_page_renders_sanitized_avatar_url_only():
     )
 
     assert 'src="https://example.com/avatar.png"' in html
+
+
+def test_profile_warning_renderer_combines_review_warnings_without_raw_dict_syntax():
+    html = warnings_panel(
+        [
+            {
+                "code": "canonical_fields_pending",
+                "message": "Canonical fields are still pending and may be incomplete.",
+                "details": {},
+            },
+            {
+                "code": "ambiguous_candidates_present",
+                "message": "Some source accounts were left for review.",
+                "details": {"count": 2},
+            },
+        ]
+    )
+
+    assert "Profile needs review" in html
+    assert "2 possible matching accounts" in html
+    assert "2 candidate accounts need review" in html
+    assert "{'code':" not in html
+    assert "canonical_fields_pending" not in html
+
+
+def test_profile_warning_renderer_uses_review_candidate_count_detail():
+    html = warnings_panel(
+        [
+            {
+                "code": "profile_needs_review",
+                "message": "This profile needs review before canonical fields can be finalized.",
+                "details": {"reason": "no_auto_match_accounts", "review_candidate_count": 1},
+            }
+        ]
+    )
+
+    assert "Profile needs review" in html
+    assert "1 candidate account needs review" in html
+    assert "{'code':" not in html
+
+
+def test_profile_warning_renderer_keeps_unknown_warning_as_clean_message():
+    html = warnings_panel(
+        [
+            {
+                "code": "unexpected_warning",
+                "message": "Review <script>alert(1)</script> manually.",
+                "details": {"debug": "hidden"},
+            }
+        ]
+    )
+
+    assert "Review &lt;script&gt;alert" in html
+    assert "{'code':" not in html
+    assert "unexpected_warning" not in html
+    assert "hidden" not in html
+
+
+def test_profile_page_renders_uncertain_shell_without_accepted_sources():
+    html = render_profile_page(
+        {
+            "profile_id": "profile-uncertain",
+            "display_name": None,
+            "headline": None,
+            "confidence_level": "uncertain",
+            "profile_stage": "canonical_build_blocked",
+            "canonical_fields_pending": True,
+            "resolution_summary": {"outcome": "ambiguous_candidates"},
+            "sources": [],
+            "review_candidates": [
+                {
+                    "source": "github",
+                    "handle": "benhalpern",
+                    "decision": "needs_review",
+                    "confidence_score": 0.62,
+                    "reason": "name-only candidate requires review",
+                }
+            ],
+            "rejected_candidates": [],
+            "ai_summary": {},
+            "warnings": [
+                {
+                    "code": "profile_needs_review",
+                    "message": "No confident canonical profile was created.",
+                    "details": {"review_candidate_count": 1},
+                }
+            ],
+        }
+    )
+
+    assert "No confident canonical profile yet" in html
+    assert "Review the candidates below" in html
+    assert "No accepted sources were returned for this profile." in html
+    assert "benhalpern" in html
+    assert "uncertain" in html

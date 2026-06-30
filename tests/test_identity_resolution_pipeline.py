@@ -11,6 +11,7 @@ from app.resolution.conflict_detector import ConflictDetector
 from app.resolution.evidence import EvidenceExtractor
 from app.resolution.scorer import ResolutionScorer
 from app.schemas.enums import MatchDecision, PlatformSource
+from app.schemas.evidence import EvidenceType
 from app.schemas.requests import ProfileResolveRequest
 from app.schemas.source_account import SourceAccount
 from app.services.canonical_profile_service import CanonicalProfileService
@@ -239,6 +240,209 @@ def make_link(
         },
         "created_at": "2026-01-01T00:00:00+00:00",
     }
+
+
+def test_phase7_direct_github_devto_anchors_with_reciprocal_links_auto_match():
+    request = ProfileResolveRequest(
+        name="Ben Halpern",
+        github="benhalpern",
+        devto="ben",
+    )
+
+    github = make_source_account(
+        source="github",
+        source_user_id="583231",
+        handle="benhalpern",
+        display_name="Ben Halpern",
+        website_url="https://benhalpern.com",
+        profile_url="https://github.com/benhalpern",
+        outbound_links=["https://dev.to/ben"],
+    )
+
+    devto = make_source_account(
+        source="devto",
+        source_user_id="1",
+        handle="ben",
+        display_name="Ben Halpern",
+        website_url="https://forem.com",
+        profile_url="https://dev.to/ben",
+        outbound_links=["https://github.com/benhalpern"],
+    )
+
+    evidence_result, conflict_result, _scoring_result, classification_result = run_phase7_pipeline(
+        request=request,
+        accounts=[github, devto],
+    )
+
+    evidence_types = {item.evidence_type for item in evidence_result.evidence}
+    classifications = classification_result.classification_by_key
+
+    assert EvidenceType.DIRECT_PROFILE_LINK in evidence_types
+    assert EvidenceType.RECIPROCAL_PROFILE_LINK in evidence_types
+    assert conflict_result.count <= 1
+
+    for account in [github, devto]:
+        item = classifications[account_key(account)]
+        assert item.decision == decision_value("auto_match")
+        assert item.decision_confidence_score >= 0.85
+        assert "conflicts with another directly provided anchor" not in " ".join(item.rationale).lower()
+
+
+def test_phase7_weak_website_mismatch_alone_does_not_demote_direct_anchors():
+    request = ProfileResolveRequest(
+        name="Ben Halpern",
+        github="benhalpern",
+        devto="ben",
+    )
+
+    github = make_source_account(
+        source="github",
+        source_user_id="583231",
+        handle="benhalpern",
+        display_name="Ben Halpern",
+        website_url="https://benhalpern.com",
+        profile_url="https://github.com/benhalpern",
+    )
+
+    devto = make_source_account(
+        source="devto",
+        source_user_id="1",
+        handle="ben",
+        display_name="Ben Halpern",
+        website_url="https://forem.com",
+        profile_url="https://dev.to/ben",
+    )
+
+    _evidence_result, conflict_result, scoring_result, classification_result = run_phase7_pipeline(
+        request=request,
+        accounts=[github, devto],
+    )
+
+    pair_score = scoring_result.pair_scores[0]
+    classifications = classification_result.classification_by_key
+
+    assert conflict_result.by_type.get("website_conflict", 0) == 1
+    assert conflict_result.conflicts[0].severity.value == "low"
+    assert conflict_result.conflicts[0].metadata["weak_identity_signal"] is True
+    assert pair_score.conflict_count == 1
+
+    for account in [github, devto]:
+        item = classifications[account_key(account)]
+        assert item.decision == decision_value("auto_match")
+        assert item.decision_confidence_score >= 0.85
+        assert item.evidence_confidence_score == 0.45
+        assert item.blocking_conflict_types == []
+        assert "conflicts with another directly provided anchor" not in " ".join(item.rationale).lower()
+
+
+def test_phase7_multiple_legitimate_websites_do_not_demote_direct_anchors():
+    request = ProfileResolveRequest(
+        name="Ben Halpern",
+        github="benhalpern",
+        devto="ben",
+    )
+
+    github = make_source_account(
+        source="github",
+        source_user_id="583231",
+        handle="benhalpern",
+        display_name="Ben Halpern",
+        website_url="https://dev.to/ben",
+        profile_url="https://github.com/benhalpern",
+    )
+
+    devto = make_source_account(
+        source="devto",
+        source_user_id="1",
+        handle="ben",
+        display_name="Ben Halpern",
+        website_url="https://benhalpern.com",
+        profile_url="https://dev.to/ben",
+    )
+
+    _evidence_result, conflict_result, _scoring_result, classification_result = run_phase7_pipeline(
+        request=request,
+        accounts=[github, devto],
+    )
+
+    classifications = classification_result.classification_by_key
+
+    assert conflict_result.by_type.get("website_conflict", 0) == 0
+    assert classifications[account_key(github)].decision == decision_value("auto_match")
+    assert classifications[account_key(devto)].decision == decision_value("auto_match")
+    assert classifications[account_key(github)].blocking_conflict_types == []
+    assert classifications[account_key(devto)].blocking_conflict_types == []
+
+
+def test_phase7_strong_name_conflict_between_direct_anchors_blocks_auto_match():
+    request = ProfileResolveRequest(
+        name="Jon Skeet",
+        github="simonw",
+        stackoverflow_user_id="22656",
+    )
+
+    github = make_source_account(
+        source="github",
+        source_user_id="101",
+        handle="simonw",
+        display_name="Simon Willison",
+        profile_url="https://github.com/simonw",
+    )
+
+    stackoverflow = make_source_account(
+        source="stackoverflow",
+        source_user_id="22656",
+        handle="22656",
+        display_name="Jon Skeet",
+        profile_url="https://stackoverflow.com/users/22656/jon-skeet",
+    )
+
+    _evidence_result, conflict_result, _scoring_result, classification_result = run_phase7_pipeline(
+        request=request,
+        accounts=[github, stackoverflow],
+    )
+
+    classifications = classification_result.classification_by_key
+
+    assert conflict_result.by_type.get("name_conflict", 0) == 1
+    assert classifications[account_key(github)].decision != decision_value("auto_match")
+    assert classifications[account_key(stackoverflow)].decision != decision_value("auto_match")
+    assert "name_conflict" in classifications[account_key(github)].blocking_conflict_types
+    assert "name_conflict" in classifications[account_key(stackoverflow)].blocking_conflict_types
+
+
+def test_phase7_sparse_hn_similarity_remains_conservative():
+    request = ProfileResolveRequest(
+        name="Muhammed Amil",
+        github="amil122",
+    )
+
+    github = make_source_account(
+        source="github",
+        source_user_id="101",
+        handle="amil122",
+        display_name="Muhammed Amil",
+        profile_url="https://github.com/amil122",
+    )
+
+    hackernews = make_source_account(
+        source="hackernews",
+        source_user_id="amil122",
+        handle="amil122",
+        display_name="amil122",
+        profile_url="https://news.ycombinator.com/user?id=amil122",
+    )
+
+    _evidence_result, _conflict_result, _scoring_result, classification_result = run_phase7_pipeline(
+        request=request,
+        accounts=[github, hackernews],
+    )
+
+    hn_classification = classification_result.classification_by_key[account_key(hackernews)]
+
+    assert hn_classification.decision != decision_value("auto_match")
+    assert hn_classification.hn_conservative is True
+    assert hn_classification.weak_signal_only is True
 
 
 def test_phase7_pipeline_auto_matches_strong_discovered_account_but_not_hn_handle_only():
@@ -574,7 +778,7 @@ def test_phase8_blocks_and_clears_fields_when_no_auto_match_accounts():
     assert result.primary_website_url is None
     assert result.primary_avatar_url is None
     assert result.inferred_skills == []
-    assert result.confidence_level == "low"
+    assert result.confidence_level == "uncertain"
 
     updated = profiles_repo.profile
     assert updated["display_name"] is None
@@ -583,7 +787,7 @@ def test_phase8_blocks_and_clears_fields_when_no_auto_match_accounts():
     assert updated["primary_website_url"] is None
     assert updated["primary_avatar_url"] is None
     assert updated["inferred_skills"] == []
-    assert updated["confidence_level"] == "low"
+    assert updated["confidence_level"] == "uncertain"
 
     payload = updated["profile_payload"]
     assert payload["profile_stage"] == "canonical_build_blocked"
@@ -803,6 +1007,6 @@ def test_live_phase8_smoke_with_real_profile_id():
         assert result.profile_payload["canonical_fields_pending"] is False
 
     if status_value(result.status) == "blocked_no_auto_match":
-        assert result.confidence_level == "low"
+        assert result.confidence_level == "uncertain"
         assert result.profile_payload["profile_stage"] == "canonical_build_blocked"
         assert result.profile_payload["canonical_fields_pending"] is True
