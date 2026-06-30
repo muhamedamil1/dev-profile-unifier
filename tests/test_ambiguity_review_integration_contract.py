@@ -62,7 +62,7 @@ def test_resolution_service_persistence_contract_for_promoted_account():
         "decision": "auto_match",
         "relationship_type": "secondary",
         "verification_status": "likely_same_person",
-        "confidence_score": 0.76,
+        "confidence_score": 0.85,
     }
     assert payload["deterministic"] is True
     assert payload["llm_review"]["final_policy_action"] == "promoted_to_auto_match"

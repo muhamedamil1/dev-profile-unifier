@@ -14,7 +14,20 @@ class ProfileResolveRequest:
     def __init__(self, **data):
         self._data = dict(data)
 
+    def __getattr__(self, name):
+        try:
+            return self._data[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
     def model_dump(self, mode=None):
+        return dict(self._data)
+
+    @property
+    def provided_sources(self):
+        return [types.SimpleNamespace(value=key) for key in ("github", "devto", "hackernews", "stackoverflow_user_id") if self._data.get(key)]
+
+    def safe_input_payload(self):
         return dict(self._data)
 
 
@@ -142,3 +155,96 @@ def test_orchestration_raises_when_no_compatible_resolution_method():
 
     with pytest.raises(AppError):
         service.resolve_profile(request)
+
+class FakeResolutionRunsRepo:
+    def __init__(self, run_id):
+        self.run_id = str(run_id)
+        self.calls = []
+
+    def create_run(self, *, input_name, input_payload, sources_attempted=None):
+        self.calls.append(
+            {
+                "input_name": input_name,
+                "input_payload": input_payload,
+                "sources_attempted": sources_attempted or [],
+            }
+        )
+        return {"id": self.run_id}
+
+
+class AsyncRequiredRunIngestionService:
+    def __init__(self):
+        self.calls = []
+
+    async def ingest(self, *, request, resolution_run_id):
+        self.calls.append({"request": request, "resolution_run_id": str(resolution_run_id)})
+        return {"resolution_run_id": str(resolution_run_id)}
+
+
+class RequiredRunNormalizationService:
+    def __init__(self, account):
+        self.account = account
+        self.calls = []
+
+    def normalize_run(self, *, resolution_run_id, persist=True):
+        self.calls.append({"resolution_run_id": str(resolution_run_id), "persist": persist})
+        return {"accounts": [{"source_account": self.account}]}
+
+
+class RequiredRunResolutionService:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def resolve(self, *, resolution_run_id, request, accounts, persist=True):
+        self.calls.append(
+            {
+                "resolution_run_id": str(resolution_run_id),
+                "request": request,
+                "accounts": accounts,
+                "persist": persist,
+            }
+        )
+        return self.result
+
+
+def test_orchestration_creates_and_threads_resolution_run_id_through_real_phase_signatures():
+    profile_id = uuid4()
+    run_id = uuid4()
+    account = object()
+    request = ProfileResolveRequest(name="Muhammed Amil", github="amil122")
+    runs_repo = FakeResolutionRunsRepo(run_id)
+    ingestion_service = AsyncRequiredRunIngestionService()
+    normalization_service = RequiredRunNormalizationService(account)
+    resolution_service = RequiredRunResolutionService(
+        ResolutionResult(profile_id=str(profile_id), resolution_run_id=str(run_id), result_summary={"auto_match_count": 1})
+    )
+    service = ProfileOrchestrationService(
+        ingestion_service=ingestion_service,
+        normalization_service=normalization_service,
+        resolution_service=resolution_service,
+        canonical_profile_service=FakeCanonicalBuilder(),
+        profile_read_service=FakeReadService(profile_id, run_id),
+        resolution_runs_repo=runs_repo,
+    )
+
+    result = service.resolve_profile(request, build_summary=False)
+
+    assert result.profile_id == profile_id
+    assert runs_repo.calls == [
+        {
+            "input_name": "Muhammed Amil",
+            "input_payload": request.safe_input_payload(),
+            "sources_attempted": ["github"],
+        }
+    ]
+    assert ingestion_service.calls == [{"request": request, "resolution_run_id": str(run_id)}]
+    assert normalization_service.calls == [{"resolution_run_id": str(run_id), "persist": True}]
+    assert resolution_service.calls == [
+        {
+            "resolution_run_id": str(run_id),
+            "request": request,
+            "accounts": [account],
+            "persist": True,
+        }
+    ]

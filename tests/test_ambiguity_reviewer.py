@@ -516,7 +516,7 @@ def test_decision_payload_patch_and_final_link_fields_preserve_safe_metadata():
     assert link_fields["decision"] == "auto_match"
     assert link_fields["relationship_type"] == "secondary"
     assert link_fields["verification_status"] == "likely_same_person"
-    assert link_fields["confidence_score"] == pytest.approx(0.76)
+    assert link_fields["confidence_score"] == pytest.approx(0.85)
 
 
 def test_rejected_link_fields_are_set_safely():
