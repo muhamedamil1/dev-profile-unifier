@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from typing import Any, Callable
@@ -40,6 +41,7 @@ class ProfileOrchestrationService:
         canonical_profile_service=None,
         summary_service=None,
         profile_read_service=None,
+        resolution_runs_repo=None,
         settings=None,
     ) -> None:
         self.ingestion_service = ingestion_service
@@ -48,6 +50,7 @@ class ProfileOrchestrationService:
         self.canonical_profile_service = canonical_profile_service
         self.summary_service = summary_service
         self.profile_read_service = profile_read_service
+        self.resolution_runs_repo = resolution_runs_repo
         self.settings = settings
 
     def resolve_profile(
@@ -67,23 +70,32 @@ class ProfileOrchestrationService:
                 public_message="Profile resolution is not available.",
             )
 
-        ingestion_result = self._run_optional_ingestion(request=request, persist=persist, warnings=warnings)
-        normalized_accounts = self._run_optional_normalization(
-            ingestion_result=ingestion_result,
+        resolution_run_id = self._create_resolution_run(request=request, persist=persist)
+        ingestion_result = self._run_optional_ingestion(
             request=request,
+            resolution_run_id=resolution_run_id,
             persist=persist,
             warnings=warnings,
         )
+        normalization_result = self._run_optional_normalization(
+            ingestion_result=ingestion_result,
+            request=request,
+            resolution_run_id=resolution_run_id,
+            persist=persist,
+            warnings=warnings,
+        )
+        normalized_accounts = self._extract_normalized_accounts(normalization_result)
 
         resolution_result = self._run_resolution(
             request=request,
+            resolution_run_id=resolution_run_id,
             normalized_accounts=normalized_accounts,
             ingestion_result=ingestion_result,
             persist=persist,
         )
 
         profile_id = self._extract_profile_id(resolution_result)
-        resolution_run_id = self._extract_resolution_run_id(resolution_result)
+        resolution_run_id = self._extract_resolution_run_id(resolution_result) or resolution_run_id
 
         if not profile_id:
             raise AppError(
@@ -117,10 +129,40 @@ class ProfileOrchestrationService:
         detail_payload["raw_result_summary"] = self._extract_result_summary(resolution_result)
         return ProfileResolveAPIResponse(**detail_payload)
 
+    def _create_resolution_run(self, *, request: ProfileResolveRequest, persist: bool) -> str | UUID | None:
+        if not persist or not self.resolution_runs_repo:
+            return None
+
+        payload = request.safe_input_payload() if hasattr(request, "safe_input_payload") else request.model_dump(mode="json")
+        sources = [source.value if hasattr(source, "value") else str(source) for source in getattr(request, "provided_sources", [])]
+        run = self.resolution_runs_repo.create_run(
+            input_name=getattr(request, "name", ""),
+            input_payload=payload,
+            sources_attempted=sources,
+        )
+        return self._get_value(run, "id") or self._get_value(run, "resolution_run_id")
+
+    @staticmethod
+    def _extract_normalized_accounts(normalization_result: Any) -> Any:
+        if normalization_result is None:
+            return None
+
+        accounts = ProfileOrchestrationService._get_value(normalization_result, "accounts")
+        if accounts is None:
+            return normalization_result
+
+        extracted = []
+        for account in accounts:
+            source_account = ProfileOrchestrationService._get_value(account, "source_account")
+            extracted.append(source_account if source_account is not None else account)
+        return extracted
+
+
     def _run_optional_ingestion(
         self,
         *,
         request: ProfileResolveRequest,
+        resolution_run_id: str | UUID | None,
         persist: bool,
         warnings: list[APIWarning],
     ) -> Any:
@@ -136,9 +178,9 @@ class ProfileOrchestrationService:
         return self._call_first_compatible(
             self.ingestion_service,
             [
-                ("ingest_for_request", {"request": request, "persist": persist}),
-                ("ingest", {"request": request, "persist": persist}),
-                ("run", {"request": request, "persist": persist}),
+                ("ingest_for_request", {"request": request, "resolution_run_id": resolution_run_id, "persist": persist}),
+                ("ingest", {"request": request, "resolution_run_id": resolution_run_id, "persist": persist}),
+                ("run", {"request": request, "resolution_run_id": resolution_run_id, "persist": persist}),
             ],
         )
 
@@ -147,6 +189,7 @@ class ProfileOrchestrationService:
         *,
         ingestion_result: Any,
         request: ProfileResolveRequest,
+        resolution_run_id: str | UUID | None,
         persist: bool,
         warnings: list[APIWarning],
     ) -> Any:
@@ -162,10 +205,11 @@ class ProfileOrchestrationService:
         return self._call_first_compatible(
             self.normalization_service,
             [
-                ("normalize_ingestion_result", {"ingestion_result": ingestion_result, "persist": persist}),
-                ("normalize_for_request", {"request": request, "ingestion_result": ingestion_result, "persist": persist}),
-                ("normalize", {"ingestion_result": ingestion_result, "persist": persist}),
-                ("run", {"ingestion_result": ingestion_result, "persist": persist}),
+                ("normalize_run", {"resolution_run_id": resolution_run_id, "persist": persist}),
+                ("normalize_ingestion_result", {"ingestion_result": ingestion_result, "resolution_run_id": resolution_run_id, "persist": persist}),
+                ("normalize_for_request", {"request": request, "ingestion_result": ingestion_result, "resolution_run_id": resolution_run_id, "persist": persist}),
+                ("normalize", {"ingestion_result": ingestion_result, "resolution_run_id": resolution_run_id, "persist": persist}),
+                ("run", {"ingestion_result": ingestion_result, "resolution_run_id": resolution_run_id, "persist": persist}),
             ],
         )
 
@@ -173,6 +217,7 @@ class ProfileOrchestrationService:
         self,
         *,
         request: ProfileResolveRequest,
+        resolution_run_id: str | UUID | None,
         normalized_accounts: Any,
         ingestion_result: Any,
         persist: bool,
@@ -180,9 +225,9 @@ class ProfileOrchestrationService:
         return self._call_first_compatible(
             self.resolution_service,
             [
-                ("resolve", {"request": request, "accounts": normalized_accounts, "persist": persist}),
-                ("resolve_profile", {"request": request, "accounts": normalized_accounts, "persist": persist}),
-                ("run", {"request": request, "accounts": normalized_accounts, "ingestion_result": ingestion_result, "persist": persist}),
+                ("resolve", {"resolution_run_id": resolution_run_id, "request": request, "accounts": normalized_accounts, "persist": persist}),
+                ("resolve_profile", {"resolution_run_id": resolution_run_id, "request": request, "accounts": normalized_accounts, "persist": persist}),
+                ("run", {"resolution_run_id": resolution_run_id, "request": request, "accounts": normalized_accounts, "ingestion_result": ingestion_result, "persist": persist}),
                 ("resolve_request", {"request": request, "persist": persist}),
             ],
         )
@@ -257,7 +302,10 @@ class ProfileOrchestrationService:
                 skipped.append(f"{method_name}:{reason}")
                 continue
 
-            return method(**filtered_kwargs)
+            result = method(**filtered_kwargs)
+            if inspect.isawaitable(result):
+                return ProfileOrchestrationService._run_awaitable(result)
+            return result
 
         names = ", ".join(name for name, _ in candidates)
         raise AppError(
@@ -267,6 +315,19 @@ class ProfileOrchestrationService:
             ),
             public_message="Profile resolution pipeline is not correctly configured.",
         )
+
+    @staticmethod
+    def _run_awaitable(awaitable: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(awaitable)
+
+        raise AppError(
+            message="Cannot run asynchronous profile pipeline method from an active event loop.",
+            public_message="Profile resolution pipeline is not correctly configured.",
+        )
+
 
     @staticmethod
     def _compatible_kwargs(method: Callable[..., Any], kwargs: dict[str, Any]) -> tuple[bool, dict[str, Any], str]:

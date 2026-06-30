@@ -333,5 +333,6 @@ def get_profile_orchestration_service() -> ProfileOrchestrationService:
         canonical_profile_service=get_canonical_profile_service(),
         summary_service=get_summary_service(),
         profile_read_service=get_profile_read_service(),
+        resolution_runs_repo=get_resolution_runs_repo(),
         settings=get_settings(),
     )
