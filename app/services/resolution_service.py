@@ -124,6 +124,7 @@ class ResolutionService:
         classification_result = self.classifier.classify(
             accounts=accounts_for_pipeline,
             scoring_result=scoring_result,
+            request=request,
         )
 
         review_batch = None

@@ -104,6 +104,7 @@ def run_phase7_pipeline(
     classification_result = DecisionClassifier().classify(
         accounts=accounts,
         scoring_result=scoring_result,
+        request=request,
     )
 
     return evidence_result, conflict_result, scoring_result, classification_result
@@ -405,10 +406,38 @@ def test_phase7_strong_name_conflict_between_direct_anchors_blocks_auto_match():
     classifications = classification_result.classification_by_key
 
     assert conflict_result.by_type.get("name_conflict", 0) == 1
-    assert classifications[account_key(github)].decision != decision_value("auto_match")
-    assert classifications[account_key(stackoverflow)].decision != decision_value("auto_match")
-    assert "name_conflict" in classifications[account_key(github)].blocking_conflict_types
-    assert "name_conflict" in classifications[account_key(stackoverflow)].blocking_conflict_types
+    assert classifications[account_key(github)].decision == decision_value("needs_review")
+    assert classifications[account_key(stackoverflow)].decision == decision_value("auto_match")
+    assert "target_name_conflict" in classifications[account_key(github)].blocking_conflict_types
+    assert classifications[account_key(stackoverflow)].blocking_conflict_types == []
+
+
+
+def test_phase7_direct_anchor_conflicting_with_requested_name_is_not_auto_match():
+    request = ProfileResolveRequest(
+        name="Linus Torvalds",
+        github="simonw",
+    )
+
+    github = make_source_account(
+        source="github",
+        source_user_id="101",
+        handle="simonw",
+        display_name="Simon Willison",
+        profile_url="https://github.com/simonw",
+    )
+
+    _evidence_result, _conflict_result, _scoring_result, classification_result = run_phase7_pipeline(
+        request=request,
+        accounts=[github],
+    )
+
+    classification = classification_result.classification_by_key[account_key(github)]
+
+    assert classification.decision == decision_value("needs_review")
+    assert classification.accepted_as_anchor is False
+    assert "target_name_conflict" in classification.blocking_conflict_types
+    assert classification.metadata["target_identity_gate"] == "failed_name_conflict"
 
 
 def test_phase7_sparse_hn_similarity_remains_conservative():
