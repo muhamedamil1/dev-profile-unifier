@@ -721,6 +721,7 @@ class ProfilesRepo(BaseRepository):
     ) -> Any:
         current_payloads = payloads
         removed_columns: set[str] = set()
+        retried_uncertain_insert = False
 
         while True:
             logger.info(
@@ -743,6 +744,23 @@ class ProfilesRepo(BaseRepository):
                     operation="insert_profile_source_links_for_classifications",
                 )
             except StorageError as exc:
+                if (
+                    not retried_uncertain_insert
+                    and self._is_uncertain_profile_source_links_insert_error(exc)
+                ):
+                    recovered = self._read_profile_source_links_after_uncertain_insert(current_payloads)
+                    if self._has_all_profile_source_links(current_payloads, recovered):
+                        logger.warning(
+                            "profile_source_links insert response was lost, but rows were found on readback."
+                        )
+                        return recovered
+
+                    retried_uncertain_insert = True
+                    logger.warning(
+                        "profile_source_links insert disconnected before response; retrying once after empty readback."
+                    )
+                    continue
+
                 missing_column = self._missing_profile_source_links_column(exc)
                 if missing_column is None or missing_column in removed_columns:
                     logger.exception(
@@ -775,6 +793,74 @@ class ProfilesRepo(BaseRepository):
                     for payload in current_payloads
                 ]
 
+    def _is_uncertain_profile_source_links_insert_error(self, exc: StorageError) -> bool:
+        error = str(exc.internal_details.get("error", "")).lower()
+        return any(
+            marker in error
+            for marker in (
+                "server disconnected",
+                "remoteprotocolerror",
+                "connection reset",
+                "connection aborted",
+                "networkerror",
+            )
+        )
+
+    def _read_profile_source_links_after_uncertain_insert(
+        self,
+        payloads: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        profile_ids = {str(row.get("profile_id")) for row in payloads if row.get("profile_id")}
+        if len(profile_ids) != 1:
+            return []
+
+        profile_id = next(iter(profile_ids))
+        expected_source_ids = {
+            str(row.get("source_account_id"))
+            for row in payloads
+            if row.get("source_account_id")
+        }
+        if not expected_source_ids:
+            return []
+
+        try:
+            data = self._execute(
+                self.client.table("profile_source_links")
+                .select("*")
+                .eq("profile_id", profile_id),
+                operation="read_profile_source_links_after_uncertain_insert",
+            )
+        except StorageError:
+            logger.exception(
+                "Failed to read back profile_source_links after uncertain insert."
+            )
+            return []
+
+        if not isinstance(data, list):
+            return []
+
+        return [
+            row
+            for row in data
+            if str(row.get("source_account_id")) in expected_source_ids
+        ]
+
+    def _has_all_profile_source_links(
+        self,
+        payloads: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+    ) -> bool:
+        expected = {
+            str(row.get("source_account_id"))
+            for row in payloads
+            if row.get("source_account_id")
+        }
+        found = {
+            str(row.get("source_account_id"))
+            for row in rows
+            if row.get("source_account_id")
+        }
+        return bool(expected) and expected <= found
     def _source_link_payload(
         self,
         *,

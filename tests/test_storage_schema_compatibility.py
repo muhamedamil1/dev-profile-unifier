@@ -48,14 +48,22 @@ class FakeQuery:
 class FakeClient:
     def __init__(self):
         self.profile_link_insert_payloads = []
+        self.profile_link_select_rows = []
+        self.profile_link_insert_disconnects = 0
         self.run_update_payloads = []
 
     def table(self, table_name):
         return FakeQuery(action="table", table_name=table_name, client=self)
 
     def execute(self, query: FakeQuery):
+        if query.table_name == "profile_source_links" and query.payload == "*":
+            return FakeResponse(self.profile_link_select_rows)
+
         if query.table_name == "profile_source_links" and query.payload is not None:
             self.profile_link_insert_payloads.append(query.payload)
+            if self.profile_link_insert_disconnects > 0:
+                self.profile_link_insert_disconnects -= 1
+                raise RuntimeError("Server disconnected")
             first_payload = query.payload[0] if isinstance(query.payload, list) else query.payload
             if "decision_payload" in first_payload:
                 raise RuntimeError("Could not find the 'decision_payload' column of 'profile_source_links' in the schema cache")
@@ -155,3 +163,48 @@ def test_profile_source_link_anchor_uses_decision_confidence_for_db_contract():
     assert payload["decision_payload"]["evidence_confidence_score"] == 0.25
     assert payload["decision_payload"]["decision_confidence_score"] == 0.85
     assert payload["decision_payload"]["account_score"] == 0.25
+def test_profile_source_link_insert_disconnect_reads_back_inserted_rows():
+    client = FakeClient()
+    client.profile_link_insert_disconnects = 1
+    repo = ProfilesRepo(client)
+    profile_id = str(uuid4())
+    source_account_id = str(uuid4())
+    payload = {
+        "profile_id": profile_id,
+        "source_account_id": source_account_id,
+        "confidence_score": 0.85,
+        "decision": "auto_match",
+        "relationship_type": "primary",
+        "verification_status": "claimed_by_input",
+        "positive_signal_count": 1,
+        "negative_signal_count": 0,
+        "has_high_conflict": False,
+    }
+    client.profile_link_select_rows = [{"id": str(uuid4()), **payload}]
+
+    result = repo._insert_profile_source_links_with_fallback([payload])
+
+    assert result == client.profile_link_select_rows
+    assert len(client.profile_link_insert_payloads) == 1
+
+
+def test_profile_source_link_insert_disconnect_retries_after_empty_readback():
+    client = FakeClient()
+    client.profile_link_insert_disconnects = 1
+    repo = ProfilesRepo(client)
+    payload = {
+        "profile_id": str(uuid4()),
+        "source_account_id": str(uuid4()),
+        "confidence_score": 0.85,
+        "decision": "auto_match",
+        "relationship_type": "primary",
+        "verification_status": "claimed_by_input",
+        "positive_signal_count": 1,
+        "negative_signal_count": 0,
+        "has_high_conflict": False,
+    }
+
+    result = repo._insert_profile_source_links_with_fallback([payload])
+
+    assert result == [payload]
+    assert len(client.profile_link_insert_payloads) == 2
