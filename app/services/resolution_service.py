@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from time import perf_counter
 from typing import Any
 from uuid import UUID
@@ -9,16 +10,15 @@ from app.resolution.ambiguity_reviewer import GeminiAmbiguityReviewer
 from app.resolution.conflict_detector import ConflictDetector
 from app.resolution.evidence import EvidenceExtractor
 from app.resolution.scorer import ResolutionScorer
-from app.schemas.classification import AccountClassification, ClassificationResult, ClassificationThresholds
-from app.schemas.conflicts import ConflictDetectionResult, DetectedConflict
-from app.schemas.enums import ResolutionStatus
-from app.schemas.evidence import EvidenceExtractionResult, ExtractedEvidence, EvidenceTargetType
+from app.schemas.classification import AccountClassification, ClassificationResult
+from app.schemas.conflicts import DetectedConflict
+from app.schemas.enums import MatchDecision, ResolutionStatus
+from app.schemas.evidence import ExtractedEvidence, EvidenceTargetType
 from app.schemas.requests import ProfileResolveRequest
 from app.schemas.resolution_pipeline import (
     ResolutionPersistenceCounts,
     ResolutionPipelineResult,
 )
-from app.schemas.scoring import ScoringResult
 from app.schemas.source_account import SourceAccount
 from app.storage.conflicts_repo import ConflictsRepo
 from app.storage.evidence_repo import EvidenceRepo
@@ -26,6 +26,9 @@ from app.storage.profiles_repo import ProfilesRepo
 from app.storage.resolution_runs_repo import ResolutionRunsRepo
 from app.storage.source_accounts_repo import SourceAccountsRepo
 from app.utils.errors import ResolutionFailedError
+
+
+logger = logging.getLogger(__name__)
 
 
 class ResolutionService:
@@ -86,10 +89,8 @@ class ResolutionService:
         run_uuid = UUID(str(resolution_run_id))
 
         if not accounts:
-            return self._resolve_no_candidates(
-                resolution_run_id=run_uuid,
-                request=request,
-                persist=persist,
+            raise ResolutionFailedError(
+                "No normalized source accounts were available for resolution."
             )
 
         try:
@@ -168,10 +169,6 @@ class ResolutionService:
                     summary=summary,
                     replace_existing=replace_existing,
                 )
-                self._patch_review_summary(
-                    resolution_run_id=run_uuid,
-                    review_batch=review_batch,
-                )
             except Exception as exc:
                 self._mark_run_failed_safely(
                     resolution_run_id=run_uuid,
@@ -182,6 +179,11 @@ class ResolutionService:
                     "The resolution result could not be saved safely.",
                     details={"error_type": type(exc).__name__},
                 ) from exc
+
+            self._patch_review_summary_safely(
+                resolution_run_id=run_uuid,
+                review_batch=review_batch,
+            )
 
             canonical_profile_id = persistence_counts.canonical_profile_id
             summary = {
@@ -253,12 +255,40 @@ class ResolutionService:
         summary: dict[str, Any],
         replace_existing: bool,
     ) -> ResolutionPersistenceCounts:
+        usable_classification = self._has_usable_classification(classifications)
         self._validate_persistence_inputs(
             evidence=evidence,
             conflicts=conflicts,
-            classifications=classifications,
+            classifications=classifications if usable_classification else [],
         )
 
+        # Supabase REST writes here are not transactional. A Postgres RPC that
+        # validates, replaces, inserts, and finalizes in one DB transaction is
+        # the production-hardening path if this workflow grows more complex.
+        if not usable_classification:
+            if replace_existing:
+                self._delete_existing_profile_for_run(resolution_run_id)
+
+            final_summary = {
+                **summary,
+                "canonical_profile_id": None,
+                "canonical_profile_pending": False,
+                "no_profile_created_reason": "all_accounts_rejected",
+            }
+            self.resolution_runs_repo.finalize_resolution(
+                resolution_run_id=resolution_run_id,
+                status=self._resolution_status_for_summary(final_summary),
+                summary=final_summary,
+            )
+            return ResolutionPersistenceCounts(
+                match_evidence_rows=0,
+                profile_conflict_rows=0,
+                profile_source_link_rows=0,
+                canonical_profile_created=False,
+                canonical_profile_reused=False,
+                canonical_profile_upserted=False,
+                canonical_profile_id=None,
+            )
 
         profile_row, created = self.profiles_repo.create_resolution_shell(
             resolution_run_id=resolution_run_id,
@@ -296,7 +326,6 @@ class ResolutionService:
         final_summary = {
             **summary,
             "canonical_profile_id": str(canonical_profile_id),
-            "canonical_profile_created": created,
         }
         self.resolution_runs_repo.finalize_resolution(
             resolution_run_id=resolution_run_id,
@@ -326,13 +355,9 @@ class ResolutionService:
         auto_keys = classification_result.auto_matched_account_keys
         review_keys = classification_result.needs_review_account_keys
         rejected_keys = classification_result.rejected_account_keys
-        outcome = self._resolution_outcome(
-            account_count=len(accounts),
-            auto_match_count=len(auto_keys),
-            needs_review_count=len(review_keys),
-            reject_count=len(rejected_keys),
+        has_usable_classification = self._has_usable_classification(
+            classification_result.classifications
         )
-        outcome_reason = self._resolution_outcome_reason(outcome)
 
         max_evidence_score = max(
             (item.evidence_confidence_score for item in classification_result.classifications),
@@ -363,17 +388,41 @@ class ResolutionService:
             "max_decision_confidence_score": round(max_decision_score, 4),
             "confidence_level": self._confidence_level(max_evidence_score),
             "confidence_policy": "anchor_floor_separated_from_evidence_score",
-            "candidate_count": len(accounts),
-            "canonical_profile_pending": True,
-            "canonical_profile_created": False,
-            "canonical_profile_trusted": bool(auto_keys),
-            "outcome": outcome,
-            "outcome_reason": outcome_reason,
-            "external_api_warnings": [],
-            "source_failure_count": 0,
+            "canonical_profile_pending": has_usable_classification,
         }
 
+        if not has_usable_classification:
+            summary["no_profile_created_reason"] = "all_accounts_rejected"
+
         return summary
+
+    def _patch_review_summary_safely(
+        self,
+        *,
+        resolution_run_id: UUID,
+        review_batch: Any,
+    ) -> None:
+        """Best-effort persistence for optional LLM ambiguity-review metadata.
+
+        The core resolution has already been saved by the time this method is
+        called. A transient Supabase/PostgREST issue while merging the optional
+        review summary must not flip an otherwise persisted resolution into a
+        user-visible resolution_failed response. The detailed per-link
+        decision_payload rows are already persisted with the main resolution
+        payload, so this run-level summary patch is useful observability data,
+        not a correctness requirement.
+        """
+
+        try:
+            self._patch_review_summary(
+                resolution_run_id=resolution_run_id,
+                review_batch=review_batch,
+            )
+        except Exception:  # noqa: BLE001 - optional metadata must not fail the run
+            logger.exception(
+                "Failed to patch optional ambiguity review summary; continuing with saved resolution.",
+                extra={"resolution_run_id": str(resolution_run_id)},
+            )
 
     def _patch_review_summary(
         self,
@@ -420,6 +469,12 @@ class ResolutionService:
             if item.source_account_id is None:
                 raise ResolutionFailedError("Classification is missing a persisted source account ID.")
 
+    def _has_usable_classification(self, classifications: list[AccountClassification]) -> bool:
+        return any(
+            item.decision in {MatchDecision.AUTO_MATCH, MatchDecision.NEEDS_REVIEW}
+            for item in classifications
+        )
+
     def _confidence_level(self, score: float) -> str:
         if score >= 0.85:
             return "high"
@@ -433,106 +488,10 @@ class ResolutionService:
         return "uncertain"
 
     def _resolution_status_for_summary(self, summary: dict[str, Any]) -> ResolutionStatus:
-        if summary.get("outcome") in {"ambiguous_candidates", "no_confident_match", "no_candidates_found"}:
-            return ResolutionStatus.PARTIAL
-
         if summary.get("has_review_items") or summary.get("has_rejections"):
             return ResolutionStatus.PARTIAL
 
         return ResolutionStatus.RESOLVED
-
-
-    def _resolve_no_candidates(
-        self,
-        *,
-        resolution_run_id: UUID,
-        request: ProfileResolveRequest,
-        persist: bool,
-    ) -> ResolutionPipelineResult:
-        classification_result = ClassificationResult(
-            classifications=[],
-            thresholds=ClassificationThresholds(),
-            anchor_account_keys=[],
-        )
-        summary = self._build_summary(
-            request=request,
-            accounts=[],
-            evidence=[],
-            conflict_count=0,
-            classification_result=classification_result,
-        )
-
-        persistence_counts = ResolutionPersistenceCounts()
-        canonical_profile_id: UUID | None = None
-        if persist:
-            profile_row, created = self.profiles_repo.create_resolution_shell(
-                resolution_run_id=resolution_run_id,
-                request=request,
-                summary=summary,
-            )
-            canonical_profile_id = UUID(str(profile_row["id"]))
-            summary = {
-                **summary,
-                "canonical_profile_id": str(canonical_profile_id),
-                "canonical_profile_created": created,
-            }
-            self.resolution_runs_repo.finalize_resolution(
-                resolution_run_id=resolution_run_id,
-                status=self._resolution_status_for_summary(summary),
-                summary=summary,
-            )
-            persistence_counts = ResolutionPersistenceCounts(
-                canonical_profile_created=created,
-                canonical_profile_reused=not created,
-                canonical_profile_upserted=True,
-                canonical_profile_id=canonical_profile_id,
-            )
-
-        return ResolutionPipelineResult(
-            resolution_run_id=resolution_run_id,
-            canonical_profile_id=canonical_profile_id,
-            evidence=EvidenceExtractionResult(evidence=[]),
-            conflicts=ConflictDetectionResult(conflicts=[]),
-            scoring=ScoringResult(),
-            classification=classification_result,
-            persistence=persistence_counts,
-            persisted=persist,
-            summary=summary,
-        )
-
-    def _resolution_outcome(
-        self,
-        *,
-        account_count: int,
-        auto_match_count: int,
-        needs_review_count: int,
-        reject_count: int,
-    ) -> str:
-        if account_count == 0:
-            return "no_candidates_found"
-        if auto_match_count > 0 and (needs_review_count > 0 or reject_count > 0):
-            return "partial"
-        if auto_match_count > 0:
-            return "resolved"
-        if needs_review_count > 0:
-            return "ambiguous_candidates"
-        return "no_confident_match"
-
-    def _resolution_outcome_reason(self, outcome: str) -> str:
-        reasons = {
-            "resolved": "Trusted evidence was sufficient to build a canonical identity.",
-            "partial": "A trusted canonical identity was built while preserving additional candidates for audit.",
-            "ambiguous_candidates": (
-                "Possible public accounts were found, but none had enough evidence "
-                "to become a trusted canonical identity."
-            ),
-            "no_confident_match": (
-                "Candidate accounts were evaluated, but no source had enough trusted "
-                "evidence to create a canonical identity."
-            ),
-            "no_candidates_found": "No public candidate accounts were found for the request.",
-        }
-        return reasons.get(outcome, "Resolution completed with a controlled product outcome.")
 
     def _mark_run_failed_safely(
         self,
