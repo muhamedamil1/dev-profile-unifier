@@ -31,7 +31,7 @@ def render_layout(*, title: str, active: str, content: str) -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{h(title)} Â· Dev Profile Unifier</title>
+  <title>{h(title)} · Dev Profile Unifier</title>
   <style>{APP_CSS}</style>
 </head>
 <body>
@@ -220,11 +220,6 @@ def render_profile_page(profile: Any) -> str:
     warnings = field(data, "warnings", default=[])
     ai_summary = field(data, "ai_summary", "summary", default={}) or {}
     skills = field(data, "inferred_skills", "skills", default=[])
-    profile_stage = field(data, "profile_stage", default=None)
-    canonical_fields_pending = field(data, "canonical_fields_pending", default=False)
-    resolution_summary = field(data, "resolution_summary", default={}) or {}
-    outcome = field(resolution_summary, "outcome", default=field(data, "outcome", default=None))
-    is_uncertain_profile = bool(canonical_fields_pending or profile_stage == "canonical_build_blocked" or outcome in {"ambiguous_candidates", "no_confident_match", "no_candidates_found"})
 
     initials = "".join(part[:1] for part in str(display_name).split()[:2]).upper() or "?"
     avatar_html = f'<img src="{h(avatar_url)}" alt="" />' if avatar_url else h(initials)
@@ -256,35 +251,17 @@ def render_profile_page(profile: Any) -> str:
     review_body = render_sources_table(review_candidates, empty="No ambiguous candidates require review.", review=True)
     rejected_body = render_sources_table(rejected_candidates, empty="No rejected candidates were returned.", rejected=True)
 
-    uncertain_body = render_uncertain_profile_notice(outcome=outcome, review_count=len(review_candidates), rejected_count=len(rejected_candidates)) if is_uncertain_profile else ""
-
     content = (
         header
         + warnings_panel(warnings)
-        + uncertain_body
         + card("AI summary", summary_body, subtitle="Grounded summary generated after deterministic profile building.")
-        + card("Accepted sources", sources_body, subtitle="Sources accepted into this profile. Claimed-input sources are user-provided anchors and are not external ownership verification.")
+        + card("Accepted sources", sources_body, subtitle="Accounts merged into the canonical profile.")
         + card("Needs review", review_body, subtitle="Ambiguous candidates are not merged automatically.")
         + card("Rejected candidates", rejected_body, subtitle="Excluded from canonical fields and AI summaries.")
         + card("Raw profile JSON", json_details("Open raw profile response", data), subtitle="Useful for evaluator/debug inspection.")
     )
     return render_layout(title=str(display_name), active="resolve", content=content)
 
-
-
-def render_uncertain_profile_notice(*, outcome: Any, review_count: int, rejected_count: int) -> str:
-    if outcome == "no_candidates_found":
-        body = (
-            "<p>No public candidate accounts were found for this request. "
-            "No canonical identity was created from invented or untrusted data.</p>"
-        )
-    else:
-        body = (
-            "<p>Possible public accounts were found, but the resolver did not have enough evidence "
-            "to merge them safely. Review the candidates below before trusting this identity.</p>"
-        )
-    body += f'<div class="grid grid-2">{metric_card("Needs review", review_count)}{metric_card("Rejected", rejected_count)}</div>'
-    return card("No confident canonical profile yet", body, subtitle="Uncertainty is a valid resolution outcome.")
 
 def render_summary(summary: Any) -> str:
     data = to_plain(summary) or {}
@@ -314,109 +291,20 @@ def render_sources_table(rows: list[dict[str, Any]], *, empty: str, review: bool
     table_rows: list[list[Any]] = []
     for row in rows:
         source = field(row, "source", "platform", default="unknown")
-        handle = field(row, "handle", "source_account_key", default="---")
-        decision = source_decision_label(row, default="needs_review" if review else "reject" if rejected else "auto_match")
-        confidence = source_confidence_label(row)
+        handle = field(row, "handle", "source_account_key", default="—")
+        decision = field(row, "decision", default="needs_review" if review else "reject" if rejected else "auto_match")
+        confidence = field(row, "confidence_score", "score", default="—")
         profile_url = field(row, "profile_url", "url", default=None)
-        reason = source_reason(row)
+        reason = field(row, "reason", "rationale", "explanation", default="")
         table_rows.append([
             badge_cell(source, str(source)),
             handle,
             badge_cell(decision, str(decision)),
             confidence,
-            link_cell(profile_url, "Open") if profile_url else "---",
+            link_cell(profile_url, "Open") if profile_url else "—",
             reason,
         ])
     return simple_table(["Source", "Handle", "Decision", "Confidence", "Profile", "Reason"], table_rows)
-
-
-def source_decision_label(row: dict[str, Any], *, default: str) -> str:
-    decision = str(field(row, "decision", default=default) or default)
-    verification_status = str(field(row, "verification_status", default="") or "")
-    decision_payload = source_decision_payload(row)
-    decision_basis = str(field(row, "decision_basis", default=decision_payload.get("decision_basis", "")) or "")
-    accepted_as_anchor = bool(field(row, "accepted_as_anchor", "is_anchor", default=decision_payload.get("accepted_as_anchor", decision_payload.get("is_anchor", False))))
-    if verification_status == "claimed_by_input" or decision_basis == "anchor_input" or accepted_as_anchor:
-        return f"{decision} / claimed input"
-    return decision
-
-
-def source_confidence_label(row: dict[str, Any]) -> str:
-    decision_payload = source_decision_payload(row)
-    confidence = field(row, "decision_confidence_score", "confidence_score", "score", default=decision_payload.get("decision_confidence_score"))
-    evidence_confidence = field(row, "evidence_confidence_score", default=decision_payload.get("evidence_confidence_score"))
-    if confidence is None:
-        return "---"
-    label = str(confidence)
-    if evidence_confidence is not None and str(evidence_confidence) != str(confidence):
-        label += f" \u00b7 evidence {evidence_confidence}"
-    return label
-
-
-def source_reason(row: dict[str, Any]) -> str:
-    decision_payload = source_decision_payload(row)
-    source = str(field(row, "source", "platform", default="source") or "source")
-    verification_status = str(field(row, "verification_status", default="") or "")
-    decision_basis = str(field(row, "decision_basis", default=decision_payload.get("decision_basis", "")) or "")
-    accepted_as_anchor = bool(field(row, "accepted_as_anchor", "is_anchor", default=decision_payload.get("accepted_as_anchor", decision_payload.get("is_anchor", False))))
-    hn_conservative = bool(field(row, "hn_conservative", default=decision_payload.get("hn_conservative", False)))
-
-    if verification_status == "claimed_by_input" or decision_basis == "anchor_input" or accepted_as_anchor:
-        if source == "hackernews" or hn_conservative:
-            return (
-                "User provided this Hacker News handle; accepted as a claimed input anchor, "
-                "not external ownership verification. Hacker News profiles are sparse, so treat this conservatively unless stronger evidence is present."
-            )
-        explicit = field(row, "reason", "rationale", "explanation", default=None)
-        if explicit:
-            return str(explicit)
-        return f"User provided this {source} identifier; accepted as claimed input, not external ownership verification."
-
-    explicit = field(row, "reason", "rationale", "explanation", default=None)
-    if explicit:
-        return str(explicit)
-
-    rationale_text = _text_from_reason_value(decision_payload.get("rationale"))
-    if rationale_text:
-        return rationale_text
-
-    metadata = decision_payload.get("metadata")
-    if isinstance(metadata, dict):
-        explanation = _text_from_reason_value(metadata.get("account_score_explanation"))
-        if explanation:
-            return explanation
-
-    if verification_status == "claimed_by_input":
-        return f"User provided this {source} identifier; accepted as claimed input, not external ownership verification."
-    return "---"
-
-
-def source_decision_payload(row: dict[str, Any]) -> dict[str, Any]:
-    for candidate in (
-        field(row, "decision_payload", default=None),
-        field(row, "link_decision_payload", default=None),
-    ):
-        plain = to_plain(candidate)
-        if isinstance(plain, dict):
-            return plain
-
-    evidence_summary = to_plain(field(row, "evidence_summary", default={}))
-    if isinstance(evidence_summary, dict):
-        for key in ("decision_payload", "link_decision_payload", "classifier_payload"):
-            nested = to_plain(evidence_summary.get(key))
-            if isinstance(nested, dict):
-                return nested
-    return {}
-
-
-def _text_from_reason_value(value: Any) -> str | None:
-    if isinstance(value, list):
-        texts = [str(item).strip() for item in value if str(item).strip()]
-        return " ".join(texts[:2]) if texts else None
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return None
 
 
 def render_dashboard_page(snapshot: Any, *, include_raw: bool = False, token_required: bool = False) -> str:
@@ -430,13 +318,16 @@ def render_dashboard_page(snapshot: Any, *, include_raw: bool = False, token_req
     warnings = field(data, "warnings", default=[])
     raw_views = field(data, "raw_views", default={})
 
-    remaining = field(github, "remaining", "rate_limit_remaining", default="â€”")
-    total = field(github, "total", "rate_limit_total", default="â€”")
-    reset_at = field(github, "reset_at", "rate_limit_reset_at", default="â€”")
+    remaining = field(github, "remaining", "rate_limit_remaining", default="—")
+    total = field(github, "total", "rate_limit_total", default="—")
+    reset_at = field(github, "reset_at", "rate_limit_reset_at", default="—")
     resolved = field(profile_metrics, "profiles_resolved", "resolved_profiles", "total_profiles", default=0)
     avg_time = field(profile_metrics, "average_resolution_time_ms", "avg_resolution_time_ms", default=0)
     input_tokens = field(llm, "input_tokens", "total_input_tokens", default=0)
     output_tokens = field(llm, "output_tokens", "total_output_tokens", default=0)
+    llm_calls = field(llm, "total_calls", "summaries_generated", default=0)
+    llm_success = field(llm, "successful_calls", "success_count", default=0)
+    llm_failed = field(llm, "failed_calls", "failure_count", "errors", default=0)
     retry_count = field(llm, "retry_count", "total_retry_count", default=0)
     wait_ms = field(llm, "rate_limit_wait_ms", "total_rate_limit_wait_ms", default=0)
     cost = field(llm, "estimated_cost_usd", "total_estimated_cost_usd", default=0)
@@ -446,9 +337,10 @@ def render_dashboard_page(snapshot: Any, *, include_raw: bool = False, token_req
         source = field(row, "source", default="unknown")
         total_calls = field(row, "total_calls", "call_count", default=0)
         success = field(row, "successful_calls", "success_count", default=0)
-        failed = field(row, "failed_calls", "error_count", default=0)
+        failed = field(row, "failed_calls", "failure_count", "errors", "error_count", default=0)
         avg_ms = field(row, "average_duration_ms", "avg_duration_ms", default=0)
-        api_rows.append([badge_cell(source, str(source)), total_calls, success, failed, avg_ms])
+        last_called = field(row, "last_called_at", "latest_call_at", default="—")
+        api_rows.append([badge_cell(source, str(source)), total_calls, success, failed, avg_ms, last_called])
 
     metrics = f"""
     <section class="grid grid-4">
@@ -457,7 +349,8 @@ def render_dashboard_page(snapshot: Any, *, include_raw: bool = False, token_req
       {metric_card("Gemini tokens", int(input_tokens or 0) + int(output_tokens or 0), note=f"input {input_tokens} / output {output_tokens}")}
       {metric_card("GitHub quota", f"{remaining} / {total}", note=f"reset: {reset_at}")}
     </section>
-    <section class="grid grid-3">
+    <section class="grid grid-4">
+      {metric_card("LLM calls", llm_calls, note=f"success {llm_success} / failed {llm_failed}")}
       {metric_card("LLM retries", retry_count, note="Gemini retry attempts")}
       {metric_card("LLM wait", f"{wait_ms} ms", note="local limiter + retry waits")}
       {metric_card("Estimated cost", f"${cost}", note="free-tier project stores 0.0 by default")}
@@ -472,7 +365,7 @@ def render_dashboard_page(snapshot: Any, *, include_raw: bool = False, token_req
         + '</section>'
         + warnings_panel(warnings)
         + metrics
-        + card("External API calls", simple_table(["Source", "Total", "Successful", "Failed", "Avg ms"], api_rows), subtitle="Calls recorded in api_call_metrics.")
+        + card("External API calls", simple_table(["Source", "Total", "Successful", "Failed", "Avg ms", "Last called"], api_rows), subtitle="Calls recorded in api_call_metrics.")
         + card("Raw observability JSON", json_details("Open health response", data), subtitle="JSON response used to render this dashboard.")
     )
     if include_raw and raw_views:
@@ -494,4 +387,3 @@ def render_error_page(title: str, message: str) -> str:
         active="resolve",
         content=card(title, f"<p>{h(message)}</p><a class=\"button\" href=\"/app\">Back to Resolve</a>"),
     )
-
