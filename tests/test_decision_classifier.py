@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.resolution.classifier import DecisionClassifier
 from app.schemas.classification import DecisionBasis
 from app.schemas.enums import MatchDecision, PlatformSource
+from app.schemas.requests import ProfileResolveRequest
 from app.schemas.scoring import (
     ConfidenceScore,
     ScoreComponent,
@@ -13,11 +14,18 @@ from app.schemas.scoring import (
 from app.schemas.source_account import SourceAccount
 
 
-def account(source: PlatformSource, identifier: str, *, handle: str | None = None) -> SourceAccount:
+def account(
+    source: PlatformSource,
+    identifier: str,
+    *,
+    handle: str | None = None,
+    display_name: str | None = None,
+) -> SourceAccount:
     return SourceAccount(
         source=source,
         source_user_id=identifier,
         handle=handle or identifier,
+        display_name=display_name,
         profile_url=f"https://example.com/{source.value}/{identifier}",
     )
 
@@ -164,8 +172,17 @@ def scoring(
     )
 
 
-def classify(accounts: list[SourceAccount], result: ScoringResult):
-    return DecisionClassifier().classify(accounts=accounts, scoring_result=result).classification_by_key
+def classify(
+    accounts: list[SourceAccount],
+    result: ScoringResult,
+    *,
+    request: ProfileResolveRequest | None = None,
+):
+    return DecisionClassifier().classify(
+        accounts=accounts,
+        scoring_result=result,
+        request=request,
+    ).classification_by_key
 
 
 def text(item) -> str:
@@ -395,3 +412,147 @@ def test_multi_anchor_without_corroboration_is_flagged_but_still_anchor() -> Non
     assert github_item.accepted_as_anchor is True
     assert github_item.metadata["uncorroborated_multi_anchor"] is True
     assert "no corroborating pair evidence" in text(github_item)
+
+
+
+def test_direct_anchor_with_target_name_conflict_requires_review() -> None:
+    github = account(
+        PlatformSource.GITHUB,
+        "simonw",
+        handle="simonw",
+        display_name="Simon Willison",
+    )
+    request = ProfileResolveRequest(name="Linus Torvalds", github="simonw")
+
+    item = classify(
+        [github],
+        scoring([github], anchors=[github]),
+        request=request,
+    )[github.expected_source_account_key()]
+
+    assert item.decision == MatchDecision.NEEDS_REVIEW
+    assert item.accepted_as_anchor is False
+    assert "target_name_conflict" in item.blocking_conflict_types
+    assert item.metadata["target_identity_gate"] == "failed_name_conflict"
+    assert item.metadata["name_compatibility"] == "conflicting"
+    assert "direct input is treated as a claim" in text(item)
+
+
+def test_direct_anchor_matching_target_name_still_auto_matches() -> None:
+    github = account(
+        PlatformSource.GITHUB,
+        "simonw",
+        handle="simonw",
+        display_name="Simon Willison",
+    )
+    request = ProfileResolveRequest(name="Simon Willison", github="simonw")
+    scores = {
+        github.expected_source_account_key(): account_score(
+            github,
+            confidence=0.45,
+            groups=["input_identifier", "name"],
+        )
+    }
+
+    item = classify(
+        [github],
+        scoring([github], anchors=[github], account_scores=scores),
+        request=request,
+    )[github.expected_source_account_key()]
+
+    assert item.decision == MatchDecision.AUTO_MATCH
+    assert item.accepted_as_anchor is True
+    assert "target_name_conflict" not in item.blocking_conflict_types
+
+
+def test_email_hint_can_override_target_name_conflict_for_direct_anchor() -> None:
+    github = account(
+        PlatformSource.GITHUB,
+        "legacy-handle",
+        handle="legacy-handle",
+        display_name="Old Public Name",
+    )
+    request = ProfileResolveRequest(
+        name="New Legal Name",
+        github="legacy-handle",
+        email_hint="person@example.com",
+    )
+    scores = {
+        github.expected_source_account_key(): account_score(
+            github,
+            confidence=0.60,
+            groups=["input_identifier", "email"],
+        )
+    }
+
+    item = classify(
+        [github],
+        scoring([github], anchors=[github], account_scores=scores),
+        request=request,
+    )[github.expected_source_account_key()]
+
+    assert item.decision == MatchDecision.AUTO_MATCH
+    assert item.accepted_as_anchor is True
+
+
+def test_target_supported_anchor_survives_conflicting_direct_anchor() -> None:
+    github = account(
+        PlatformSource.GITHUB,
+        "simonw",
+        handle="simonw",
+        display_name="Simon Willison",
+    )
+    stackoverflow = account(
+        PlatformSource.STACKOVERFLOW,
+        "22656",
+        handle="22656",
+        display_name="Jon Skeet",
+    )
+    request = ProfileResolveRequest(
+        name="Jon Skeet",
+        github="simonw",
+        stackoverflow_user_id="22656",
+    )
+    name_conflict = conflict_component(
+        github,
+        stackoverflow,
+        "name_conflict",
+        severity="high",
+    )
+    scores = {
+        github.expected_source_account_key(): account_score(
+            github,
+            confidence=0.25,
+            groups=["input_identifier"],
+        ),
+        stackoverflow.expected_source_account_key(): account_score(
+            stackoverflow,
+            confidence=0.45,
+            groups=["input_identifier", "name"],
+        ),
+    }
+    result = scoring(
+        [github, stackoverflow],
+        anchors=[github, stackoverflow],
+        account_scores=scores,
+        pairs=[
+            pair_score(
+                github,
+                stackoverflow,
+                confidence=0.0,
+                conflicts=[name_conflict],
+                conflict_penalty=-0.25,
+            )
+        ],
+    )
+
+    by_key = classify([github, stackoverflow], result, request=request)
+    github_item = by_key[github.expected_source_account_key()]
+    stackoverflow_item = by_key[stackoverflow.expected_source_account_key()]
+
+    assert github_item.decision == MatchDecision.NEEDS_REVIEW
+    assert github_item.accepted_as_anchor is False
+    assert "target_name_conflict" in github_item.blocking_conflict_types
+
+    assert stackoverflow_item.decision == MatchDecision.AUTO_MATCH
+    assert stackoverflow_item.accepted_as_anchor is True

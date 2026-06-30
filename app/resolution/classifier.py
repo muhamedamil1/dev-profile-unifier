@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.resolution.comparators import NameCompatibility, classify_name_compatibility
 from app.schemas.classification import (
     AccountClassification,
     ClassificationResult,
@@ -10,6 +11,7 @@ from app.schemas.classification import (
     DecisionRiskLevel,
 )
 from app.schemas.enums import MatchDecision, PlatformSource
+from app.schemas.requests import ProfileResolveRequest
 from app.schemas.scoring import (
     ConfidenceScore,
     ScoreComponentKind,
@@ -77,6 +79,7 @@ class DecisionClassifier:
         *,
         accounts: list[SourceAccount],
         scoring_result: ScoringResult,
+        request: ProfileResolveRequest | None = None,
         auto_match_threshold: float = 0.85,
         needs_review_threshold: float = 0.60,
         minimum_auto_match_independent_groups: int = 2,
@@ -120,6 +123,7 @@ class DecisionClassifier:
                     account_scores=account_scores,
                     pair_scores=pair_scores,
                     thresholds=thresholds,
+                    request=request,
                 )
             else:
                 classification = self._classify_non_anchor(
@@ -128,6 +132,7 @@ class DecisionClassifier:
                     anchor_keys=anchor_keys,
                     pair_scores=pair_scores,
                     thresholds=thresholds,
+                    request=request,
                 )
 
             classifications.append(classification)
@@ -147,8 +152,20 @@ class DecisionClassifier:
         account_scores: dict[str, ConfidenceScore],
         pair_scores: dict[str, ConfidenceScore],
         thresholds: ClassificationThresholds,
+        request: ProfileResolveRequest | None = None,
     ) -> AccountClassification:
         account_key = account.expected_source_account_key()
+
+        target_identity_review = self._target_identity_gate_classification(
+            account=account,
+            account_score=account_score,
+            request=request,
+            thresholds=thresholds,
+            is_anchor=True,
+        )
+
+        if target_identity_review is not None:
+            return target_identity_review
 
         multi_anchor_review = self._multi_anchor_review_classification(
             account=account,
@@ -211,8 +228,20 @@ class DecisionClassifier:
         anchor_keys: set[str],
         pair_scores: dict[str, ConfidenceScore],
         thresholds: ClassificationThresholds,
+        request: ProfileResolveRequest | None = None,
     ) -> AccountClassification:
         account_key = account.expected_source_account_key()
+
+        target_identity_rejection = self._target_identity_gate_classification(
+            account=account,
+            account_score=account_score,
+            request=request,
+            thresholds=thresholds,
+            is_anchor=False,
+        )
+
+        if target_identity_rejection is not None:
+            return target_identity_rejection
 
         if not anchor_keys:
             return self._classify_without_anchor(
@@ -832,6 +861,135 @@ class DecisionClassifier:
 
         return not any(pair_score.positive_signal_count > 0 for pair_score in anchor_pairs)
 
+    def _target_identity_gate_classification(
+        self,
+        *,
+        account: SourceAccount,
+        account_score: ConfidenceScore,
+        request: ProfileResolveRequest | None,
+        thresholds: ClassificationThresholds,
+        is_anchor: bool,
+    ) -> AccountClassification | None:
+        """
+        Apply the target identity conflict gate.
+
+        A platform identifier supplied by the user is a claim to evaluate, not
+        proof that the fetched public account belongs to the requested person.
+        If the request name is a strong full-name conflict with the account's
+        public display name, the account must not enter the canonical profile
+        automatically unless there is stronger identity evidence such as an
+        email-hint match. Directly supplied accounts are preserved as
+        needs_review; discovered accounts are rejected.
+        """
+
+        context = self._target_identity_context(account=account, request=request)
+        if not context.get("has_name_conflict"):
+            return None
+
+        if self._has_strong_target_override(account_score):
+            return None
+
+        conflict_types = ["target_name_conflict"]
+        blocking_conflict_types = ["target_name_conflict"]
+        evidence_score = account_score.confidence_score
+
+        if is_anchor:
+            return self._make_classification(
+                account=account,
+                decision=MatchDecision.NEEDS_REVIEW,
+                basis=DecisionBasis.BLOCKING_CONFLICT_REVIEW,
+                risk_level=DecisionRiskLevel.HIGH,
+                evidence_confidence_score=evidence_score,
+                decision_confidence_score=max(evidence_score, thresholds.needs_review_threshold),
+                account_score=account_score,
+                best_pair_score=None,
+                is_anchor=True,
+                accepted_as_anchor=False,
+                conflict_types=conflict_types,
+                blocking_conflict_types=blocking_conflict_types,
+                rationale=[
+                    "The account was directly provided in the request, but its public display name conflicts with the requested identity.",
+                    "Direct input is treated as a claim to evaluate, not proof that the account belongs to the requested person.",
+                    "Kept as needs_review instead of accepted so the canonical profile is not built from a wrong-name account.",
+                ],
+                metadata={
+                    "anchor_policy": "target_identity_conflict_review",
+                    "target_identity_gate": "failed_name_conflict",
+                    **context,
+                },
+            )
+
+        return self._make_classification(
+            account=account,
+            decision=MatchDecision.REJECT,
+            basis=DecisionBasis.REJECTED_CONFLICT,
+            risk_level=DecisionRiskLevel.HIGH,
+            evidence_confidence_score=evidence_score,
+            decision_confidence_score=evidence_score,
+            account_score=account_score,
+            best_pair_score=None,
+            is_anchor=False,
+            accepted_as_anchor=False,
+            conflict_types=conflict_types,
+            blocking_conflict_types=blocking_conflict_types,
+            rationale=[
+                "The discovered account's public display name conflicts with the requested identity.",
+                "Rejected to prevent a wrong-name discovered account from entering the canonical profile.",
+            ],
+            metadata={
+                "anchor_policy": "target_identity_conflict_rejection",
+                "target_identity_gate": "failed_name_conflict",
+                **context,
+            },
+        )
+
+    def _target_identity_context(
+        self,
+        *,
+        account: SourceAccount,
+        request: ProfileResolveRequest | None,
+    ) -> dict[str, Any]:
+        if request is None:
+            return {
+                "has_target_identity_context": False,
+                "has_name_conflict": False,
+            }
+
+        compatibility = classify_name_compatibility(
+            request.name,
+            account.display_name,
+        )
+
+        return {
+            "has_target_identity_context": True,
+            "has_name_conflict": compatibility.compatibility == NameCompatibility.CONFLICTING,
+            "request_name": request.name,
+            "account_display_name": account.display_name,
+            "normalized_request_name": compatibility.left_normalized,
+            "normalized_account_name": compatibility.right_normalized,
+            "request_name_tokens": compatibility.left_tokens,
+            "account_name_tokens": compatibility.right_tokens,
+            "overlap_tokens": compatibility.overlap_tokens,
+            "name_similarity": compatibility.similarity,
+            "name_compatibility": compatibility.compatibility.value,
+            "name_compatibility_reason": compatibility.reason,
+        }
+
+    def _has_strong_target_override(self, account_score: ConfidenceScore) -> bool:
+        """Return True only for evidence strong enough to override a name conflict."""
+
+        groups = {str(group).lower() for group in account_score.independent_positive_groups}
+        if "email" in groups:
+            return True
+
+        for component in account_score.components:
+            if component.kind != ScoreComponentKind.POSITIVE_EVIDENCE:
+                continue
+            if component.signal_type == "email_hint_match":
+                return True
+
+        return False
+
     def _multi_anchor_review_classification(
         self,
         *,
@@ -851,7 +1009,10 @@ class DecisionClassifier:
         present, an anchor must have either request-identity support
         (name/email) or account-pair corroboration with another anchor before it
         can be accepted into the canonical profile. Uncorroborated anchors are
-        flagged in metadata; only blocking contradictions demote direct anchors.
+        flagged in metadata; blocking contradictions or target-name conflicts
+        demote direct anchors. If one conflicting anchor is supported by the
+        requested identity and the other is not, the supported anchor is kept
+        while the unsupported anchor is reviewed.
         """
 
         if len(anchor_keys) <= 1:
@@ -874,6 +1035,13 @@ class DecisionClassifier:
             other_key = self._other_account_key(account_key, problematic_pair)
             other_score = account_scores.get(other_key or "")
             other_has_request_identity = self._has_request_identity_support(other_score)
+
+            # If exactly one of the conflicting direct anchors is supported by
+            # the requested identity, keep the supported anchor and demote the
+            # unsupported one. This preserves the best target-aligned account
+            # while still preventing a false merge.
+            if has_request_identity and not other_has_request_identity:
+                return None
 
             conflict_types = self._conflict_types(problematic_pair)
             blocking_types = self._blocking_conflict_types(problematic_pair)
@@ -902,6 +1070,7 @@ class DecisionClassifier:
                     "has_request_identity_support": has_request_identity,
                     "other_anchor_has_request_identity_support": other_has_request_identity,
                     "conflicting_anchor_key": other_key,
+                    "target_supported_anchor_preserved": False,
                 },
             )
 
