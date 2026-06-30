@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from app.schemas.classification import AccountClassification, DecisionBasis, DecisionRiskLevel
 from app.schemas.enums import MatchDecision, PlatformSource
+from app.schemas.requests import ProfileResolveRequest
 from app.storage.profiles_repo import ProfilesRepo
 from app.storage.resolution_runs_repo import ResolutionRunsRepo
 from app.utils.errors import StorageError
@@ -20,9 +21,11 @@ class FakeQuery:
         self.table_name = table_name
         self.client = client
         self.payload = None
+        self.operation = "table"
         self.filters: list[tuple[str, str, str]] = []
 
     def select(self, payload):
+        self.operation = "select"
         self.payload = payload
         return self
 
@@ -30,10 +33,12 @@ class FakeQuery:
         return self
 
     def insert(self, payload):
+        self.operation = "insert"
         self.payload = payload
         return self
 
     def update(self, payload):
+        self.operation = "update"
         self.payload = payload
         return self
 
@@ -51,6 +56,8 @@ class FakeClient:
         self.profile_link_select_rows = []
         self.profile_link_insert_disconnects = 0
         self.run_update_payloads = []
+        self.canonical_profile_existing_row = None
+        self.canonical_profile_update_payloads = []
 
     def table(self, table_name):
         return FakeQuery(action="table", table_name=table_name, client=self)
@@ -69,6 +76,19 @@ class FakeClient:
                 raise RuntimeError("Could not find the 'decision_payload' column of 'profile_source_links' in the schema cache")
             return FakeResponse(query.payload)
 
+        if query.table_name == "canonical_profiles" and query.operation == "select":
+            if self.canonical_profile_existing_row is None:
+                return FakeResponse([])
+            row = self.canonical_profile_existing_row
+            if self.canonical_profile_update_payloads and any(
+                key == "id" and str(value) == str(row["id"])
+                for _op, key, value in query.filters
+            ):
+                row = {**row, **self.canonical_profile_update_payloads[-1]}
+            return FakeResponse([row])
+        if query.table_name == "canonical_profiles" and query.operation == "update":
+            self.canonical_profile_update_payloads.append(query.payload)
+            return FakeResponse([])
         if query.table_name == "resolution_runs" and query.payload == "*":
             row_id = query.filters[0][2] if query.filters else str(uuid4())
             return FakeResponse([{"id": row_id, "started_at": "2026-06-30T00:00:00+00:00", "source_errors": [], "sources_failed": [], "sources_attempted": []}])
@@ -208,3 +228,28 @@ def test_profile_source_link_insert_disconnect_retries_after_empty_readback():
 
     assert result == [payload]
     assert len(client.profile_link_insert_payloads) == 2
+
+def test_profiles_repo_existing_resolution_shell_reads_back_empty_update_response():
+    client = FakeClient()
+    profile_id = uuid4()
+    run_id = uuid4()
+    client.canonical_profile_existing_row = {
+        "id": str(profile_id),
+        "resolution_run_id": str(run_id),
+        "display_name": "Old Name",
+        "headline": "Old headline",
+        "profile_payload": {},
+    }
+    repo = ProfilesRepo(client)
+
+    row, created = repo.create_resolution_shell(
+        resolution_run_id=run_id,
+        request=ProfileResolveRequest(name="Simon Willison"),
+        summary={"confidence_level": "uncertain"},
+    )
+
+    assert created is False
+    assert row["id"] == str(profile_id)
+    assert row["display_name"] == "Simon Willison"
+    assert row["headline"] is None
+    assert client.canonical_profile_update_payloads[0]["headline"] is None

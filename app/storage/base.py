@@ -263,8 +263,10 @@ class BaseRepository:
         self,
         row_id: str | UUID,
         payload: dict[str, Any],
+        *,
+        strip_none: bool = True,
     ) -> dict[str, Any]:
-        clean_payload = self._serialize_payload(payload)
+        clean_payload = self._serialize_payload(payload, strip_none=strip_none)
         data = self._execute(
             self.client.table(self.table_name)
             .update(clean_payload)

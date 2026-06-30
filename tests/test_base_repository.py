@@ -119,6 +119,24 @@ def test_update_by_id_reads_back_row_when_update_response_is_empty():
     ]
 
 
+def test_update_by_id_can_preserve_null_fields_during_readback():
+    row_id = uuid4()
+    repo = ExampleRepo(
+        FakeClient(
+            update_data=[],
+            fetched_row={"id": str(row_id), "headline": None},
+        )
+    )
+
+    row = repo._update_by_id(row_id, {"headline": None}, strip_none=False)
+
+    assert row == {"id": str(row_id), "headline": None}
+    assert repo.client.calls == [
+        ("example_table", "update", {"headline": None}),
+        ("example_table", "select", "*"),
+    ]
+
+
 def test_update_by_id_raises_when_update_and_readback_find_no_row():
     repo = ExampleRepo(FakeClient(update_data=[], fetched_row=None))
 

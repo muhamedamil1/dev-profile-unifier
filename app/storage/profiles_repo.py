@@ -287,14 +287,11 @@ class ProfilesRepo(BaseRepository):
         }
 
         if existing:
-            clean_payload = self._serialize_payload(payload, strip_none=False)
-            data = self._execute(
-                self.client.table(self.table_name)
-                .update(clean_payload)
-                .eq("id", str(existing["id"])),
-                operation="update_resolution_shell",
-            )
-            return self._require_one(data, operation="update_resolution_shell"), False
+            return self._update_by_id(
+                existing["id"],
+                payload,
+                strip_none=False,
+            ), False
 
         return self._insert_one(payload), True
 
@@ -382,14 +379,11 @@ class ProfilesRepo(BaseRepository):
             "updated_at": datetime.now(UTC).isoformat(),
         }
 
-        clean_payload = self._serialize_payload(payload, strip_none=False)
-        data = self._execute(
-            self.client.table(self.table_name)
-            .update(clean_payload)
-            .eq("id", str(profile_id)),
-            operation="update_canonical_profile_fields",
+        return self._update_by_id(
+            profile_id,
+            payload,
+            strip_none=False,
         )
-        return self._require_one(data, operation="update_canonical_profile_fields")
 
     def update_profile_payload_patch(
         self,
@@ -410,21 +404,14 @@ class ProfilesRepo(BaseRepository):
             **patch,
         }
 
-        data = self._execute(
-            self.client.table(self.table_name)
-            .update(
-                self._serialize_payload(
-                    {
-                        "profile_payload": merged_payload,
-                        "updated_at": datetime.now(UTC).isoformat(),
-                    },
-                    strip_none=False,
-                )
-            )
-            .eq("id", str(profile_id)),
-            operation="update_profile_payload_patch",
+        return self._update_by_id(
+            profile_id,
+            {
+                "profile_payload": merged_payload,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            strip_none=False,
         )
-        return self._require_one(data, operation="update_profile_payload_patch")
 
     def create_profile_conflict(
         self,
