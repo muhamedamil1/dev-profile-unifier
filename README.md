@@ -19,16 +19,17 @@ This project is intentionally **not** a simple API aggregator. The core of the s
 7. [Schema Design](#schema-design)
 8. [Entity Resolution Strategy](#entity-resolution-strategy)
 9. [LLM Usage and Guardrails](#llm-usage-and-guardrails)
-10. [Observability](#observability)
-11. [Security and Privacy](#security-and-privacy)
-12. [Local Setup](#local-setup)
-13. [Supabase Setup](#supabase-setup)
-14. [Running the App](#running-the-app)
-15. [Testing](#testing)
-16. [Deployment Notes](#deployment-notes)
-17. [Example Test Cases](#example-test-cases)
-18. [Known Tradeoffs](#known-tradeoffs)
-19. [What I Would Do Differently With More Time](#what-i-would-do-differently-with-more-time)
+10. [AI Assistant Usage Disclosure](#ai-assistant-usage-disclosure)
+11. [Observability](#observability)
+12. [Security and Privacy](#security-and-privacy)
+13. [Local Setup](#local-setup)
+14. [Supabase Setup](#supabase-setup)
+15. [Running the App](#running-the-app)
+16. [Testing](#testing)
+17. [Deployment Notes](#deployment-notes)
+18. [Example Test Cases](#example-test-cases)
+19. [Known Tradeoffs](#known-tradeoffs)
+20. [What I Would Do Differently With More Time](#what-i-would-do-differently-with-more-time)
 
 ---
 
@@ -920,6 +921,21 @@ GEMINI_RATE_LIMIT_MAX_WAIT_SECONDS=60.0
 ```
 
 ---
+
+## AI Assistant Usage Disclosure
+
+AI assistants such as ChatGPT, Claude Code, Cursor, and similar tools were used as productivity and review aids during the project. Their usage was not treated as a replacement for system design, engineering judgment, implementation ownership, or final validation.
+
+My workflow was:
+
+1. First, I designed the system architecture, requirements, data flow, reliability model, and core implementation approach myself.
+2. After the initial design, I used AI assistants to critically review the system design, identify possible reliability gaps, question edge cases, and evaluate whether the approach was safe enough for an auditable identity-resolution system.
+3. Based on that feedback, I refined the architecture and redesigned parts of the system where needed, especially around reliability, deterministic decision-making, conflict handling, observability, and failure safety.
+4. Once the requirements, design decisions, edge cases, API contracts, schema structure, and guardrails were properly identified, I converted the plan into a PRD-style implementation roadmap and used that to guide development.
+5. During implementation, I used AI assistants to speed up debugging, regression-test planning, test-case generation, and review of failure scenarios.
+6. Final decisions, design tradeoffs, code integration, and validation remained my responsibility.
+
+The main benefit of using AI assistants was faster iteration. They helped me challenge assumptions, catch missing edge cases, improve reliability thinking, and debug more efficiently. This allowed the project to move faster while still keeping the system grounded in deterministic logic, explicit evidence, test coverage, and conservative merge decisions.
 
 ## Observability
 
